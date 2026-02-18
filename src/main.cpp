@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <U8g2lib.h>
 #include <bitset>
+#include <STM32FreeRTOS.h>
 
 //Constants
   const uint32_t interval = 100; //Display update interval
@@ -128,32 +129,39 @@ void sampleISR() {
 }
 
 void scanKeysTask(void * pvParameters) {
-    // Key scanning loop for Rows 0-2
-    for (int i = 0; i < 3; i++) {
-        setRow(i);
-        delayMicroseconds(3);
+    const TickType_t xFrequency = 50/portTICK_PERIOD_MS;
+    TickType_t xLastWakeTime = xTaskGetTickCount();
 
-        std::bitset<4> cols = readCols();
+    while (1) {
+        vTaskDelayUntil( &xLastWakeTime, xFrequency );
+
+        // Key scanning loop for Rows 0-2
+        for (int i = 0; i < 3; i++) {
+            setRow(i);
+            delayMicroseconds(3);
+
+            std::bitset<4> cols = readCols();
+            
+            // Map columns into 32-bit set
+            int offset = i * 4;
+            for (int bit = 0; bit < 4; bit++) {
+                sysState.inputs[offset + bit] = cols[bit];
+            }
+        }
+
+        uint32_t localCurrentStepSize = 0;
+        sysState.lastPressedKey = -1;
         
-        // Map columns into 32-bit set
-        int offset = i * 4;
-        for (int bit = 0; bit < 4; bit++) {
-            sysState.inputs[offset + bit] = cols[bit];
+        for (int i = 0; i < 12; i++) {
+            // Check if the key is pressed. 
+            if (sysState.inputs[i] == 0) { 
+                localCurrentStepSize = stepSizes[i];
+                sysState.lastPressedKey = i;
+            }
         }
-    }
 
-    uint32_t localCurrentStepSize = 0;
-    sysState.lastPressedKey = -1;
-    
-    for (int i = 0; i < 12; i++) {
-        // Check if the key is pressed. 
-        if (sysState.inputs[i] == 0) { 
-            localCurrentStepSize = stepSizes[i];
-            sysState.lastPressedKey = i;
-        }
+        __atomic_store_n(&currentStepSize, localCurrentStepSize, __ATOMIC_RELAXED);
     }
-
-    __atomic_store_n(&currentStepSize, localCurrentStepSize, __ATOMIC_RELAXED);
 }
 
 void setup() {
@@ -192,6 +200,20 @@ void setup() {
   sampleTimer.setOverflow(22000, HERTZ_FORMAT);
   sampleTimer.attachInterrupt(sampleISR);
   sampleTimer.resume();
+
+  //Initialise and run thread
+  TaskHandle_t scanKeysHandle = NULL;
+  xTaskCreate(
+    scanKeysTask,
+    "scanKeys",
+    64,
+    NULL,
+    1,
+    &scanKeysHandle
+  );
+  
+  //Start RTOS scheduler
+  vTaskStartScheduler();
 }
 
 void loop() {
@@ -199,8 +221,6 @@ void loop() {
   static uint32_t next = millis();
   while (millis() < next);  //Wait for next interval
   next += interval;
-
-  scanKeysTask(NULL);
 
   //Update display
   u8g2.clearBuffer();                 // clear the internal memory
