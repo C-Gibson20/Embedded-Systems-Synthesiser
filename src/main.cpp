@@ -69,6 +69,12 @@ U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2(U8G2_R0);
 //Hardware Timer
 HardwareTimer sampleTimer(TIM1);
 
+// Stores system state used in more than one thread
+struct {
+    std::bitset<32> inputs;
+    int lastPressedKey = -1;
+} sysState;
+
 //Function to set outputs using key matrix
 void setOutMuxBit(const uint8_t bitIdx, const bool value) {
       digitalWrite(REN_PIN,LOW);
@@ -117,8 +123,37 @@ void sampleISR() {
     phaseAcc += localStepSize;
 
     int32_t Vout = (phaseAcc >> 24) - 128;
-    Vout = Vout >> 1; // Reduce volume
+    Vout = Vout >> 2; // Reduce volume
     analogWrite(OUTR_PIN, Vout + 128);
+}
+
+void scanKeysTask(void * pvParameters) {
+    // Key scanning loop for Rows 0-2
+    for (int i = 0; i < 3; i++) {
+        setRow(i);
+        delayMicroseconds(3);
+
+        std::bitset<4> cols = readCols();
+        
+        // Map columns into 32-bit set
+        int offset = i * 4;
+        for (int bit = 0; bit < 4; bit++) {
+            sysState.inputs[offset + bit] = cols[bit];
+        }
+    }
+
+    uint32_t localCurrentStepSize = 0;
+    sysState.lastPressedKey = -1;
+    
+    for (int i = 0; i < 12; i++) {
+        // Check if the key is pressed. 
+        if (sysState.inputs[i] == 0) { 
+            localCurrentStepSize = stepSizes[i];
+            sysState.lastPressedKey = i;
+        }
+    }
+
+    __atomic_store_n(&currentStepSize, localCurrentStepSize, __ATOMIC_RELAXED);
 }
 
 void setup() {
@@ -165,34 +200,7 @@ void loop() {
   while (millis() < next);  //Wait for next interval
   next += interval;
 
-  std::bitset<32> inputs;
-
-  // Key scanning loop for Rows 0-2
-  for (int i = 0; i < 3; i++) {
-      setRow(i);
-      delayMicroseconds(3);
-
-      std::bitset<4> cols = readCols();
-      
-      // Map columns into 32-bit set
-      int offset = i * 4;
-      for (int bit = 0; bit < 4; bit++) {
-          inputs[offset + bit] = cols[bit];
-      }
-  }
-
-  uint32_t localCurrentStepSize = 0;
-  int lastPressedKey = -1;
-  
-  for (int i = 0; i < 12; i++) {
-      // Check if the key is pressed. 
-      if (inputs[i] == 0) { 
-          localCurrentStepSize = stepSizes[i];
-          lastPressedKey = i;
-      }
-  }
-
-  __atomic_store_n(&currentStepSize, localCurrentStepSize, __ATOMIC_RELAXED);
+  scanKeysTask(NULL);
 
   //Update display
   u8g2.clearBuffer();                 // clear the internal memory
@@ -200,11 +208,11 @@ void loop() {
   u8g2.setCursor(2,10);
 
   // Print the state of the first 12 keys as a Hex value
-  u8g2.print(inputs.to_ulong(), HEX); 
+  u8g2.print(sysState.inputs.to_ulong(), HEX); 
 
-  if (lastPressedKey != -1) {
+  if (sysState.lastPressedKey != -1) {
       u8g2.drawStr(0, 20, "Note Selected:");
-      u8g2.drawStr(0, 30, noteNames[lastPressedKey]);
+      u8g2.drawStr(0, 30, noteNames[sysState.lastPressedKey]);
   } else {
       u8g2.drawStr(0, 20, "No Key Pressed");
   }
