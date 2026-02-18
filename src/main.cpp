@@ -110,9 +110,14 @@ void setRow(uint8_t rowIdx){
 
 void sampleISR() {
     static uint32_t phaseAcc = 0;
-    phaseAcc += currentStepSize;
+    uint32_t localStepSize;
+
+    localStepSize = __atomic_load_n(&currentStepSize, __ATOMIC_RELAXED);
+    
+    phaseAcc += localStepSize;
 
     int32_t Vout = (phaseAcc >> 24) - 128;
+    Vout = Vout >> 1; // Reduce volume
     analogWrite(OUTR_PIN, Vout + 128);
 }
 
@@ -176,21 +181,18 @@ void loop() {
       }
   }
 
-  // Reset currentStepSize to 0 if no key is pressed
-  uint32_t localStepSize = 0;
-  
-  // Single note playback
+  uint32_t localCurrentStepSize = 0;
   int lastPressedKey = -1;
   
   for (int i = 0; i < 12; i++) {
       // Check if the key is pressed. 
       if (inputs[i] == 0) { 
-          localStepSize = stepSizes[i];
+          localCurrentStepSize = stepSizes[i];
           lastPressedKey = i;
       }
   }
 
-  currentStepSize = localStepSize;
+  __atomic_store_n(&currentStepSize, localCurrentStepSize, __ATOMIC_RELAXED);
 
   //Update display
   u8g2.clearBuffer();                 // clear the internal memory
