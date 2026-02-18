@@ -54,22 +54,11 @@ void setOutMuxBit(const uint8_t bitIdx, const bool value) {
 std::bitset<4> readCols() {
     std::bitset<4> result;
 
-    // Set Row Select Address low
-    digitalWrite(RA0_PIN, LOW);
-    digitalWrite(RA1_PIN, LOW);
-    digitalWrite(RA2_PIN, LOW);
-
-    // Set Row Select Enable high
-    digitalWrite(REN_PIN, HIGH);
-
     // Read the columns
     result[0] = digitalRead(C0_PIN);
     result[1] = digitalRead(C1_PIN);
     result[2] = digitalRead(C2_PIN);
     result[3] = digitalRead(C3_PIN);
-
-    // Set Row Select Enable Low
-    digitalWrite(REN_PIN, LOW);
 
     return result;
 }
@@ -77,6 +66,11 @@ std::bitset<4> readCols() {
 void setRow(uint8_t rowIdx){
     // Set Row Select Enable low
     digitalWrite(REN_PIN, LOW);
+
+    // Set Row Select Address low
+    digitalWrite(RA0_PIN, rowIdx & 0x01);
+    digitalWrite(RA1_PIN, rowIdx & 0x02);
+    digitalWrite(RA2_PIN, rowIdx & 0x04);
 
     // Set Row Select Enable High
     digitalWrite(REN_PIN, HIGH);
@@ -118,21 +112,34 @@ void setup() {
 void loop() {
   // put your main code here, to run repeatedly:
   static uint32_t next = millis();
-  static uint32_t count = 0;
-
   while (millis() < next);  //Wait for next interval
-
   next += interval;
 
+  std::bitset<32> inputs;
+
+  // Key scanning loop for Rows 0-2
+  for (int i = 0; i < 3; i++) {
+      setRow(i);
+      delayMicroseconds(3);
+
+      std::bitset<4> cols = readCols();
+      
+      // Map columns into 32-bit set
+      int offset = i * 4;
+      for (int bit = 0; bit < 4; bit++) {
+          inputs[offset + bit] = cols[bit];
+      }
+  }
+  
   //Update display
-  std::bitset<4> inputs = readCols();
-  u8g2.clearBuffer();         // clear the internal memory
+  u8g2.clearBuffer();                 // clear the internal memory
   u8g2.setFont(u8g2_font_ncenB08_tr); // choose a suitable font
-  u8g2.drawStr(0,10,"Helllo World!");  // write something to the internal memory
+  u8g2.drawStr(0,10,"Helllo World!"); // write something to the internal memory
   u8g2.setCursor(2,20);
+
+  // Print the state of the first 12 keys as a Hex value
   u8g2.print(inputs.to_ulong(), HEX); 
-  // u8g2.print(count++);
-  u8g2.sendBuffer();          // transfer internal memory to the display
+  u8g2.sendBuffer();                  // transfer internal memory to the display
 
   //Toggle LED
   digitalToggle(LED_BUILTIN);
