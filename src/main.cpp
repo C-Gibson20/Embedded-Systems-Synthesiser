@@ -66,6 +66,9 @@
 //Display driver object
 U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2(U8G2_R0);
 
+//Hardware Timer
+HardwareTimer sampleTimer(TIM1);
+
 //Function to set outputs using key matrix
 void setOutMuxBit(const uint8_t bitIdx, const bool value) {
       digitalWrite(REN_PIN,LOW);
@@ -105,6 +108,14 @@ void setRow(uint8_t rowIdx){
     digitalWrite(REN_PIN, HIGH);
 }
 
+void sampleISR() {
+    static uint32_t phaseAcc = 0;
+    phaseAcc += currentStepSize;
+
+    int32_t Vout = (phaseAcc >> 24) - 128;
+    analogWrite(OUTR_PIN, Vout + 128);
+}
+
 void setup() {
   // put your setup code here, to run once:
 
@@ -136,6 +147,11 @@ void setup() {
   //Initialise UART
   Serial.begin(9600);
   Serial.println("Hello World");
+
+  // Initialise hardware timer
+  sampleTimer.setOverflow(22000, HERTZ_FORMAT);
+  sampleTimer.attachInterrupt(sampleISR);
+  sampleTimer.resume();
 }
 
 void loop() {
