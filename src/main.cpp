@@ -35,6 +35,9 @@
 
   volatile uint32_t currentStepSize = 0;
 
+  //Tuning
+  volatile int currentVolumeShift = 2;
+
 //Pin definitions
   //Row select and enable
   const int RA0_PIN = D3;
@@ -74,9 +77,8 @@ HardwareTimer sampleTimer(TIM1);
 struct {
     std::bitset<32> inputs;
     int lastPressedKey = -1;
+    int knobRotation = 2;
     SemaphoreHandle_t mutex;
-    // uint32_t scanTaskStack;    // To track scanKeysTask
-    // uint32_t displayTaskStack; // To track displayUpdateTask
 } sysState;
 
 //Function to set outputs using key matrix
@@ -121,29 +123,33 @@ void setRow(uint8_t rowIdx){
 void sampleISR() {
     static uint32_t phaseAcc = 0;
     uint32_t localStepSize;
+    int localVolumeShift;
 
     localStepSize = __atomic_load_n(&currentStepSize, __ATOMIC_RELAXED);
+    localVolumeShift = __atomic_load_n(&currentVolumeShift, __ATOMIC_RELAXED);
     
     phaseAcc += localStepSize;
 
     int32_t Vout = (phaseAcc >> 24) - 128;
-    Vout = Vout >> 2; // Reduce volume
+    Vout = Vout >> (8 - localVolumeShift); 
     analogWrite(OUTR_PIN, Vout + 128);
 }
 
 void scanKeysTask(void * pvParameters) {
-    const TickType_t xFrequency = 50/portTICK_PERIOD_MS;
+    const TickType_t xFrequency = 20/portTICK_PERIOD_MS;
     TickType_t xLastWakeTime = xTaskGetTickCount();
+
+    uint8_t prevState = 0b11;
+    int8_t lastDirection = 0;
 
     while (1) {
         vTaskDelayUntil( &xLastWakeTime, xFrequency );
 
-        // sysState.scanTaskStack = uxTaskGetStackHighWaterMark(NULL);
-
         std::bitset<32> localInputs;
+        int localRotationChange = 0;
 
-        // Key scanning loop for Rows 0-2
-        for (int i = 0; i < 3; i++) {
+        // Key scanning loop for Rows 0-3
+        for (int i = 0; i < 4; i++) {
             setRow(i);
             delayMicroseconds(3);
 
@@ -154,6 +160,27 @@ void scanKeysTask(void * pvParameters) {
             for (int bit = 0; bit < 4; bit++) {
                 localInputs[offset + bit] = cols[bit];
             }
+        }
+
+        // Decode Knob 3
+        uint8_t currA = localInputs[12];
+        uint8_t currB = localInputs[13];
+        uint8_t currState = (currB << 1) | currA;
+
+        // Apply state transation table logic
+        if (prevState != currState) {
+            if ((currState ^ prevState) == 0b11) {
+                localRotationChange = lastDirection;
+            }
+            else if ((prevState == 0b00 && currState == 0b01) || (prevState == 0b11 && currState == 0b10)) {
+                localRotationChange = 1;
+                lastDirection = 1;
+            } 
+            else if ((prevState == 0b01 && currState == 0b00) || (prevState == 0b10 && currState == 0b11)) {
+                localRotationChange = -1;
+                lastDirection = -1;
+            }
+            prevState = currState;
         }
 
         uint32_t localStepSize = 0;
@@ -170,9 +197,14 @@ void scanKeysTask(void * pvParameters) {
         xSemaphoreTake(sysState.mutex, portMAX_DELAY);
         sysState.inputs = localInputs;
         sysState.lastPressedKey = localLastKey;
+        
+        int rawNewValue = sysState.knobRotation + localRotationChange;
+        sysState.knobRotation = std::clamp(rawNewValue, 0, 8);
+        int localKnob = sysState.knobRotation;
         xSemaphoreGive(sysState.mutex);
 
         __atomic_store_n(&currentStepSize, localStepSize, __ATOMIC_RELAXED);
+        __atomic_store_n(&currentVolumeShift, localKnob, __ATOMIC_RELAXED);
     }
 }
 
@@ -183,35 +215,31 @@ void displayUpdateTask(void * pvParameters) {
     while (1) {
       vTaskDelayUntil( &xLastWakeTime, xFrequency );
 
-      // sysState.displayTaskStack = uxTaskGetStackHighWaterMark(NULL);
-
       //Update display
-      u8g2.clearBuffer();                 // clear the internal memory
-      u8g2.setFont(u8g2_font_ncenB08_tr); // choose a suitable font
+      u8g2.clearBuffer();                 
+      u8g2.setFont(u8g2_font_ncenB08_tr); 
       u8g2.setCursor(2,10);
 
       // Print the state of the first 12 keys as a Hex value
       xSemaphoreTake(sysState.mutex, portMAX_DELAY);
       std::bitset<32> localInputs = sysState.inputs;
       int localLastKey = sysState.lastPressedKey;
+      int localKnob = sysState.knobRotation;
       xSemaphoreGive(sysState.mutex);
 
       u8g2.print(localInputs.to_ulong(), HEX); 
 
+      u8g2.setCursor(0, 20);
+      u8g2.print("Note: ");
       if (localLastKey != -1) {
-          u8g2.drawStr(0, 20, "Note Selected:");
-          u8g2.drawStr(0, 30, noteNames[localLastKey]);
-      } else {
-          u8g2.drawStr(0, 20, "No Key Pressed");
+          u8g2.print(noteNames[localLastKey]);
       }
-      
-      // u8g2.setCursor(2, 30);
-      // u8g2.print("S:"); 
-      // u8g2.print(sysState.scanTaskStack);
-      // u8g2.print("D:"); 
-      // u8g2.print(sysState.displayTaskStack);
 
-      u8g2.sendBuffer(); // transfer internal memory to the display
+      u8g2.setCursor(0, 30);
+      u8g2.print("K:"); 
+      u8g2.print(localKnob);
+      
+      u8g2.sendBuffer();
 
       //Toggle LED
       digitalToggle(LED_BUILTIN);
@@ -249,6 +277,10 @@ void setup() {
   //Initialise UART
   Serial.begin(9600);
   Serial.println("Hello World");
+
+  // Initialize the atomic variables before the timer starts
+  __atomic_store_n(&currentVolumeShift, sysState.knobRotation, __ATOMIC_RELAXED);
+  __atomic_store_n(&currentStepSize, 0, __ATOMIC_RELAXED);
 
   // Initialise hardware timer
   sampleTimer.setOverflow(22000, HERTZ_FORMAT);
