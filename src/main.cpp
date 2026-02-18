@@ -164,6 +164,35 @@ void scanKeysTask(void * pvParameters) {
     }
 }
 
+void displayUpdateTask(void * pvParameters) {
+    const TickType_t xFrequency = 100/portTICK_PERIOD_MS;
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+
+    while (1) {
+      vTaskDelayUntil( &xLastWakeTime, xFrequency );
+
+      //Update display
+      u8g2.clearBuffer();                 // clear the internal memory
+      u8g2.setFont(u8g2_font_ncenB08_tr); // choose a suitable font
+      u8g2.setCursor(2,10);
+
+      // Print the state of the first 12 keys as a Hex value
+      u8g2.print(sysState.inputs.to_ulong(), HEX); 
+
+      if (sysState.lastPressedKey != -1) {
+          u8g2.drawStr(0, 20, "Note Selected:");
+          u8g2.drawStr(0, 30, noteNames[sysState.lastPressedKey]);
+      } else {
+          u8g2.drawStr(0, 20, "No Key Pressed");
+      }
+
+      u8g2.sendBuffer(); // transfer internal memory to the display
+
+      //Toggle LED
+      digitalToggle(LED_BUILTIN);
+    }
+}
+
 void setup() {
   // put your setup code here, to run once:
 
@@ -208,37 +237,24 @@ void setup() {
     "scanKeys",
     64,
     NULL,
-    1,
+    2,
     &scanKeysHandle
   );
-  
+
+  TaskHandle_t displayUpdateHandle = NULL;
+  xTaskCreate(
+    displayUpdateTask,
+    "displayUpdate",
+    256,
+    NULL,
+    1,
+    &displayUpdateHandle
+  );
+
   //Start RTOS scheduler
   vTaskStartScheduler();
 }
 
 void loop() {
-  // put your main code here, to run repeatedly:
-  static uint32_t next = millis();
-  while (millis() < next);  //Wait for next interval
-  next += interval;
-
-  //Update display
-  u8g2.clearBuffer();                 // clear the internal memory
-  u8g2.setFont(u8g2_font_ncenB08_tr); // choose a suitable font
-  u8g2.setCursor(2,10);
-
-  // Print the state of the first 12 keys as a Hex value
-  u8g2.print(sysState.inputs.to_ulong(), HEX); 
-
-  if (sysState.lastPressedKey != -1) {
-      u8g2.drawStr(0, 20, "Note Selected:");
-      u8g2.drawStr(0, 30, noteNames[sysState.lastPressedKey]);
-  } else {
-      u8g2.drawStr(0, 20, "No Key Pressed");
-  }
-
-  u8g2.sendBuffer(); // transfer internal memory to the display
-
-  //Toggle LED
-  digitalToggle(LED_BUILTIN);
+  
 }
