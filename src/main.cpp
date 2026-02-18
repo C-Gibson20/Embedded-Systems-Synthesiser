@@ -4,6 +4,35 @@
 
 //Constants
   const uint32_t interval = 100; //Display update interval
+  
+  //Formula
+  const double fs = 22000.0;
+  const double pow2_32 = 4294967296.0;
+
+  const char* noteNames[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+
+  constexpr float f_notes[] = {
+    261.63f, 277.18f, 293.66f, 311.13f, // C, C#, D, D#
+    329.63f, 349.23f, 369.99f, 392.00f, // E, F, F#, G
+    415.30f, 440.00f, 466.16f, 493.88f  // G#, A, A#, B
+  };
+
+  constexpr uint32_t stepSizes[] = {
+      (uint32_t)(f_notes[0] * pow2_32 / fs),
+      (uint32_t)(f_notes[1] * pow2_32 / fs),
+      (uint32_t)(f_notes[2] * pow2_32 / fs),
+      (uint32_t)(f_notes[3] * pow2_32 / fs),
+      (uint32_t)(f_notes[4] * pow2_32 / fs),
+      (uint32_t)(f_notes[5] * pow2_32 / fs),
+      (uint32_t)(f_notes[6] * pow2_32 / fs),
+      (uint32_t)(f_notes[7] * pow2_32 / fs),
+      (uint32_t)(f_notes[8] * pow2_32 / fs),
+      (uint32_t)(f_notes[9] * pow2_32 / fs),
+      (uint32_t)(f_notes[10] * pow2_32 / fs),
+      (uint32_t)(f_notes[11] * pow2_32 / fs)
+  };
+
+  volatile uint32_t currentStepSize = 0;
 
 //Pin definitions
   //Row select and enable
@@ -130,16 +159,39 @@ void loop() {
           inputs[offset + bit] = cols[bit];
       }
   }
+
+  // Reset currentStepSize to 0 if no key is pressed
+  uint32_t localStepSize = 0;
   
+  // Single note playback
+  int lastPressedKey = -1;
+  
+  for (int i = 0; i < 12; i++) {
+      // Check if the key is pressed. 
+      if (inputs[i] == 0) { 
+          localStepSize = stepSizes[i];
+          lastPressedKey = i;
+      }
+  }
+
+  currentStepSize = localStepSize;
+
   //Update display
   u8g2.clearBuffer();                 // clear the internal memory
   u8g2.setFont(u8g2_font_ncenB08_tr); // choose a suitable font
-  u8g2.drawStr(0,10,"Helllo World!"); // write something to the internal memory
-  u8g2.setCursor(2,20);
+  u8g2.setCursor(2,10);
 
   // Print the state of the first 12 keys as a Hex value
   u8g2.print(inputs.to_ulong(), HEX); 
-  u8g2.sendBuffer();                  // transfer internal memory to the display
+
+  if (lastPressedKey != -1) {
+      u8g2.drawStr(0, 20, "Note Selected:");
+      u8g2.drawStr(0, 30, noteNames[lastPressedKey]);
+  } else {
+      u8g2.drawStr(0, 20, "No Key Pressed");
+  }
+
+  u8g2.sendBuffer(); // transfer internal memory to the display
 
   //Toggle LED
   digitalToggle(LED_BUILTIN);
