@@ -74,6 +74,9 @@ HardwareTimer sampleTimer(TIM1);
 struct {
     std::bitset<32> inputs;
     int lastPressedKey = -1;
+    SemaphoreHandle_t mutex;
+    // uint32_t scanTaskStack;    // To track scanKeysTask
+    // uint32_t displayTaskStack; // To track displayUpdateTask
 } sysState;
 
 //Function to set outputs using key matrix
@@ -135,6 +138,10 @@ void scanKeysTask(void * pvParameters) {
     while (1) {
         vTaskDelayUntil( &xLastWakeTime, xFrequency );
 
+        // sysState.scanTaskStack = uxTaskGetStackHighWaterMark(NULL);
+
+        std::bitset<32> localInputs;
+
         // Key scanning loop for Rows 0-2
         for (int i = 0; i < 3; i++) {
             setRow(i);
@@ -145,22 +152,27 @@ void scanKeysTask(void * pvParameters) {
             // Map columns into 32-bit set
             int offset = i * 4;
             for (int bit = 0; bit < 4; bit++) {
-                sysState.inputs[offset + bit] = cols[bit];
+                localInputs[offset + bit] = cols[bit];
             }
         }
 
-        uint32_t localCurrentStepSize = 0;
-        sysState.lastPressedKey = -1;
+        uint32_t localStepSize = 0;
+        int localLastKey = -1;
         
         for (int i = 0; i < 12; i++) {
             // Check if the key is pressed. 
-            if (sysState.inputs[i] == 0) { 
-                localCurrentStepSize = stepSizes[i];
-                sysState.lastPressedKey = i;
+            if (localInputs[i] == 0) { 
+                localStepSize = stepSizes[i];
+                localLastKey = i;
             }
         }
 
-        __atomic_store_n(&currentStepSize, localCurrentStepSize, __ATOMIC_RELAXED);
+        xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+        sysState.inputs = localInputs;
+        sysState.lastPressedKey = localLastKey;
+        xSemaphoreGive(sysState.mutex);
+
+        __atomic_store_n(&currentStepSize, localStepSize, __ATOMIC_RELAXED);
     }
 }
 
@@ -171,20 +183,33 @@ void displayUpdateTask(void * pvParameters) {
     while (1) {
       vTaskDelayUntil( &xLastWakeTime, xFrequency );
 
+      // sysState.displayTaskStack = uxTaskGetStackHighWaterMark(NULL);
+
       //Update display
       u8g2.clearBuffer();                 // clear the internal memory
       u8g2.setFont(u8g2_font_ncenB08_tr); // choose a suitable font
       u8g2.setCursor(2,10);
 
       // Print the state of the first 12 keys as a Hex value
-      u8g2.print(sysState.inputs.to_ulong(), HEX); 
+      xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+      std::bitset<32> localInputs = sysState.inputs;
+      int localLastKey = sysState.lastPressedKey;
+      xSemaphoreGive(sysState.mutex);
 
-      if (sysState.lastPressedKey != -1) {
+      u8g2.print(localInputs.to_ulong(), HEX); 
+
+      if (localLastKey != -1) {
           u8g2.drawStr(0, 20, "Note Selected:");
-          u8g2.drawStr(0, 30, noteNames[sysState.lastPressedKey]);
+          u8g2.drawStr(0, 30, noteNames[localLastKey]);
       } else {
           u8g2.drawStr(0, 20, "No Key Pressed");
       }
+      
+      // u8g2.setCursor(2, 30);
+      // u8g2.print("S:"); 
+      // u8g2.print(sysState.scanTaskStack);
+      // u8g2.print("D:"); 
+      // u8g2.print(sysState.displayTaskStack);
 
       u8g2.sendBuffer(); // transfer internal memory to the display
 
@@ -250,6 +275,9 @@ void setup() {
     1,
     &displayUpdateHandle
   );
+
+  //Create mutex and assign handle
+  sysState.mutex = xSemaphoreCreateMutex();
 
   //Start RTOS scheduler
   vTaskStartScheduler();
