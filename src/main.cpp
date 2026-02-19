@@ -47,12 +47,15 @@
   };
 
 //Shared state
+enum SynthRole { SENDER, RECEIVER };
+
 volatile uint32_t currentStepSize = 0;
 
 struct {
+    SynthRole role = RECEIVER;
     std::bitset<32> inputs;
     int lastPressedKey = -1;
-    uint8_t RX_Message[8]={0};
+    std::array<uint8_t, 8> RX_Message = {0};
     SemaphoreHandle_t mutex;
 } sysState;
 
@@ -108,6 +111,10 @@ U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2(U8G2_R0);
 //Hardware Timer
 HardwareTimer sampleTimer(TIM1);
 
+// ================================================= //
+// ================ Hardware Helpers =============== //
+// ================================================= //
+
 //Function to set outputs using key matrix
 void setOutMuxBit(const uint8_t bitIdx, const bool value) {
       digitalWrite(REN_PIN,LOW);
@@ -150,6 +157,10 @@ void setRow(uint8_t rowIdx){
     delayMicroseconds(2);
 }
 
+// ================================================= //
+// ============= Interrupt Subroutines ============= //
+// ================================================= //
+
 void sampleISR() {
     static uint32_t phaseAcc = 0;
     uint32_t localStepSize = __atomic_load_n(&currentStepSize, __ATOMIC_RELAXED);
@@ -168,15 +179,19 @@ void knobISR() {
 }
 
 void CAN_RX_ISR (void) {
-    uint8_t RX_Message_ISR[8];
+    std::array<uint8_t, 8> RX_Message_ISR;
     uint32_t ID;
-    CAN_RX(ID, RX_Message_ISR);
-    xQueueSendFromISR(msgInQ, RX_Message_ISR, NULL);
+    CAN_RX(ID, RX_Message_ISR.data());
+    xQueueSendFromISR(msgInQ, RX_Message_ISR.data(), NULL);
 }
 
 void CAN_TX_ISR (void) {
 	xSemaphoreGiveFromISR(CAN_TX_Semaphore, NULL);
 }
+
+// ================================================= //
+// ===================== Tasks ===================== //
+// ================================================= //
 
 void knobTask(void * pvParameters) {
     uint8_t prevState = 0xFF;
@@ -211,7 +226,8 @@ void scanKeysTask(void * pvParameters) {
     TickType_t xLastWakeTime = xTaskGetTickCount();
 
     static std::bitset<32> prevInputs;
-    static uint8_t TX_Message[8] = {0};
+    static std::array<uint8_t, 8> TX_Message = {0};
+    static uint32_t lastStepSize = 0;
 
     while (1) {
         vTaskDelayUntil( &xLastWakeTime, xFrequency );
@@ -251,7 +267,7 @@ void scanKeysTask(void * pvParameters) {
                 TX_Message[0] = isPressed ? 'P' : 'R';
                 TX_Message[1] = octave;
                 TX_Message[2] = i;
-                xQueueSend( msgOutQ, TX_Message, portMAX_DELAY);
+                xQueueSend( msgOutQ, TX_Message.data(), portMAX_DELAY);
             }
         }
 
@@ -262,41 +278,49 @@ void scanKeysTask(void * pvParameters) {
         sysState.lastPressedKey = localLastKey;
         xSemaphoreGive(sysState.mutex);
 
-        __atomic_store_n(&currentStepSize, localStepSize, __ATOMIC_RELAXED);
+        // Only the receiver updates the local sound
+        if ((sysState.role == RECEIVER) && (localStepSize != lastStepSize)) {
+            __atomic_store_n(&currentStepSize, localStepSize, __ATOMIC_RELAXED);
+            lastStepSize = localStepSize;
+        } 
     }
 }
 
 void decodeTask(void * pvParameters) {
-  uint8_t localRX[8];
+  std::array<uint8_t, 8> localRX;
 
   while (1) {
       // Block until message available in queue
-      xQueueReceive(msgInQ, localRX, portMAX_DELAY);
-
-      uint32_t localStepSize = (localRX[0] == 'P') ? stepSizes[localRX[2]] : 0;
-      int8_t shift = localRX[1] - 4;
-      if (shift > 0) {
-        localStepSize <<= shift;
-      } else if (shift < 0) {
-        localStepSize >>= (-shift);
-      }
-
-      __atomic_store_n(&currentStepSize, localStepSize, __ATOMIC_RELAXED);
+      xQueueReceive(msgInQ, localRX.data(), portMAX_DELAY);
 
       xSemaphoreTake(sysState.mutex, portMAX_DELAY);
-      for (int i = 0; i < 8; i++) {
-          sysState.RX_Message[i] = localRX[i];
-      }
+      SynthRole localRole = sysState.role;
       xSemaphoreGive(sysState.mutex);
+
+      if (localRole == RECEIVER) {
+          uint32_t localStepSize = (localRX[0] == 'P') ? stepSizes[localRX[2]] : 0;
+          int8_t shift = localRX[1] - 4;
+          if (shift > 0) {
+            localStepSize <<= shift;
+          } else if (shift < 0) {
+            localStepSize >>= (-shift);
+          }
+
+          __atomic_store_n(&currentStepSize, localStepSize, __ATOMIC_RELAXED);
+
+          xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+          sysState.RX_Message = localRX;
+          xSemaphoreGive(sysState.mutex);
+      }
   }
 }
 
 void CAN_TX_Task (void * pvParameters) {
-	uint8_t msgOut[8];
+	std::array<uint8_t, 8> msgOut;
 	while (1) {
-		xQueueReceive(msgOutQ, msgOut, portMAX_DELAY);
+		xQueueReceive(msgOutQ, msgOut.data(), portMAX_DELAY);
 		xSemaphoreTake(CAN_TX_Semaphore, portMAX_DELAY);
-		CAN_TX(0x123, msgOut);
+		CAN_TX(0x123, msgOut.data());
 	}
 }
 
@@ -307,13 +331,11 @@ void displayUpdateTask(void * pvParameters) {
     while (1) {
       vTaskDelayUntil( &xLastWakeTime, xFrequency );
 
-      uint8_t localMsg[8];
+      std::array<uint8_t, 8> localMsg;
       xSemaphoreTake(sysState.mutex, portMAX_DELAY);
       std::bitset<32> localInputs = sysState.inputs;
       int localLastKey = sysState.lastPressedKey;
-      for(int i=0; i<8; i++) {
-        localMsg[i] = sysState.RX_Message[i];
-      }
+      localMsg = sysState.RX_Message;
       xSemaphoreGive(sysState.mutex);
       
       //Update display
@@ -353,6 +375,10 @@ void displayUpdateTask(void * pvParameters) {
       digitalToggle(LED_BUILTIN);
     }
 }
+
+// ================================================= //
+// ================= Setup Helpers ================= //
+// ================================================= //
 
 void wireWrites(uint8_t enableAddress, uint8_t writeVal) {
     Wire.beginTransmission(EXPANDER_ADDR); 
@@ -455,6 +481,10 @@ void initialiseThreads() {
     xTaskCreate(CAN_TX_Task, "canTX", 128, NULL, 2, &canTxHandle);
 }
 
+// ================================================= //
+// ===================== Setup ===================== //
+// ================================================= //
+
 void setup() {
   // put your setup code here, to run once:
 
@@ -486,6 +516,10 @@ void setup() {
   //Start RTOS scheduler
   vTaskStartScheduler();
 }
+
+// ================================================= //
+// ===================== Loop ====================== //
+// ================================================= //
 
 void loop() {
   
