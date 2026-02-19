@@ -214,7 +214,7 @@ void knobTask(void * pvParameters) {
             for (int i = 0; i < 4; i++) {
               uint8_t bitA = (currByte >> (i * 2)) & 0x01;
               uint8_t bitB = (currByte >> (i * 2 + 1)) & 0x01;
-              knobs[i].update(bitA, bitB);
+              knobs[i].updateRotation(bitA, bitB);
             }
             
         } while (digitalRead(PA10) == LOW); // Loop if pin is stuck
@@ -234,11 +234,22 @@ void scanKeysTask(void * pvParameters) {
 
         // Key scanning loop for Rows 0-2
         std::bitset<32> localInputs;
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < 7; i++) {
+            if (i == 3 || i == 4) continue; // Skip rotation rows now on I2C  
+            
             setRow(i);
             delayMicroseconds(3);
             std::bitset<4> cols = readCols();
-        
+
+            // Map rows 5 and 6 to the knob objects
+            if (i == 5) {
+                knobs[0].updateSwitch(cols[0]); // C0: Knob 0 S
+                knobs[3].updateSwitch(cols[1]); // C1: Knob 3 S
+            } else if (i == 6) {
+                knobs[1].updateSwitch(cols[0]); // C0: Knob 1 S
+                knobs[2].updateSwitch(cols[1]); // C1: Knob 2 S
+            }
+
             // Map columns into 32-bit set
             int offset = i * 4;
             for (int bit = 0; bit < 4; bit++) {
@@ -257,8 +268,6 @@ void scanKeysTask(void * pvParameters) {
             int octave = knobs[octaveIdx].getValue();
 
             if (isPressed) {
-                // This key is currently down
-                // localStepSize = stepSizes[i];
                 localStepSize = stepSizes[i] << (octave - 4);
                 localLastKey = i;
             }
@@ -276,6 +285,12 @@ void scanKeysTask(void * pvParameters) {
         xSemaphoreTake(sysState.mutex, portMAX_DELAY);
         sysState.inputs = localInputs;
         sysState.lastPressedKey = localLastKey;
+        
+        if (knobs[octaveIdx].isPressed()) {
+            sysState.role = (sysState.role == RECEIVER) ? SENDER : RECEIVER;
+            if (sysState.role == SENDER)
+                __atomic_store_n(&currentStepSize, 0, __ATOMIC_RELAXED); // Silent Sender
+        }
         xSemaphoreGive(sysState.mutex);
 
         // Only the receiver updates the local sound
@@ -331,11 +346,11 @@ void displayUpdateTask(void * pvParameters) {
     while (1) {
       vTaskDelayUntil( &xLastWakeTime, xFrequency );
 
-      std::array<uint8_t, 8> localMsg;
       xSemaphoreTake(sysState.mutex, portMAX_DELAY);
       std::bitset<32> localInputs = sysState.inputs;
       int localLastKey = sysState.lastPressedKey;
-      localMsg = sysState.RX_Message;
+      std::array<uint8_t, 8> localMsg = sysState.RX_Message;
+      SynthRole role = sysState.role;
       xSemaphoreGive(sysState.mutex);
       
       //Update display
@@ -367,6 +382,10 @@ void displayUpdateTask(void * pvParameters) {
       u8g2.print((char) localMsg[0]);
       u8g2.print(localMsg[1]);
       u8g2.print(localMsg[2]);
+
+      u8g2.setCursor(50,30);
+      u8g2.print("Role: ");
+      u8g2.print((role == SENDER) ? "S": "R");
       
       u8g2.sendBuffer();
       xSemaphoreGive(i2cMutex);

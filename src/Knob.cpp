@@ -6,6 +6,8 @@ Knob::Knob(int8_t startVal, int8_t min, int8_t max) :
     lowerLimit(min),
     prevState(0b11),
     lastDirection(0),
+    buttonWasPressed(false),
+    buttonChanged(false),
     atomicRotation(startVal)
 {
     
@@ -20,7 +22,7 @@ void Knob::setInitialState(uint8_t currA, uint8_t currB) {
 }
 
 // Updates state and applies clamping
-void Knob::update(uint8_t currA, uint8_t currB) {
+void Knob::updateRotation(uint8_t currA, uint8_t currB) {
     uint8_t currState = (currB << 1) | currA;
     int8_t change = 0;
 
@@ -50,6 +52,22 @@ void Knob::update(uint8_t currA, uint8_t currB) {
         // Sync with atomic for ISR
         __atomic_store_n(&atomicRotation, localCopy, __ATOMIC_RELAXED);
     }
+}
+
+void Knob::updateSwitch(bool bitS) {
+    bool pressed = (bitS == 0);
+    if (pressed && !buttonWasPressed) {
+        buttonChanged = true;
+    }
+    buttonWasPressed = pressed;
+}
+
+bool Knob::isPressed() {
+    if (buttonChanged) {
+        buttonChanged = false;
+        return true;
+    }
+    return false;
 }
 
 // Reading for display
