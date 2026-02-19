@@ -66,7 +66,7 @@ SemaphoreHandle_t CAN_TX_Semaphore;
 Knob knobs[4] = {
     Knob(0, 0, 8),
     Knob(0, 0, 8),
-    Knob(4, 4, 6),
+    Knob(4, 0, 8),
     Knob(2, 0, 8)  
 };
 const uint8_t volumeIdx = 3;
@@ -193,6 +193,23 @@ void CAN_TX_ISR (void) {
 // ===================== Tasks ===================== //
 // ================================================= //
 
+void handleSynthRole(bool westConnected, bool eastConnected) {
+    if (westConnected || eastConnected) {
+        if (!westConnected && eastConnected) {
+          sysState.role = SENDER;
+        } else {
+          sysState.role = RECEIVER;
+        }
+    }
+    else if (knobs[octaveIdx].isPressed()) {
+        sysState.role = (sysState.role == RECEIVER) ? SENDER : RECEIVER;
+    }
+
+    if (sysState.role == SENDER) {
+        __atomic_store_n(&currentStepSize, 0, __ATOMIC_RELAXED); // Silent Sender
+    }
+}
+
 void knobTask(void * pvParameters) {
     uint8_t prevState = 0xFF;
     int8_t lastDirection = 0;
@@ -228,6 +245,8 @@ void scanKeysTask(void * pvParameters) {
     static std::bitset<32> prevInputs;
     static std::array<uint8_t, 8> TX_Message = {0};
     static uint32_t lastStepSize = 0;
+    static bool westConnected = false;
+    static bool eastConnected = false;
 
     while (1) {
         vTaskDelayUntil( &xLastWakeTime, xFrequency );
@@ -243,9 +262,11 @@ void scanKeysTask(void * pvParameters) {
 
             // Map rows 5 and 6 to the knob objects
             if (i == 5) {
+                westConnected = (cols[3] == 0);
                 knobs[0].updateSwitch(cols[0]); // C0: Knob 0 S
                 knobs[3].updateSwitch(cols[1]); // C1: Knob 3 S
             } else if (i == 6) {
+                eastConnected = (cols[3] == 0);
                 knobs[1].updateSwitch(cols[0]); // C0: Knob 1 S
                 knobs[2].updateSwitch(cols[1]); // C1: Knob 2 S
             }
@@ -264,7 +285,6 @@ void scanKeysTask(void * pvParameters) {
             // Compare current state to previous state for this specific key
             bool isPressed = (localInputs[i] == 0);
             bool wasPressed = (prevInputs[i] == 0);
-            bool stateChanged = (isPressed != wasPressed);
             int octave = knobs[octaveIdx].getValue();
 
             if (isPressed) {
@@ -272,11 +292,11 @@ void scanKeysTask(void * pvParameters) {
                 localLastKey = i;
             }
 
-            if(stateChanged) {
+            if (isPressed != wasPressed) {
                 TX_Message[0] = isPressed ? 'P' : 'R';
                 TX_Message[1] = octave;
                 TX_Message[2] = i;
-                xQueueSend( msgOutQ, TX_Message.data(), portMAX_DELAY);
+                xQueueSend(msgOutQ, TX_Message.data(), portMAX_DELAY);
             }
         }
 
@@ -285,16 +305,11 @@ void scanKeysTask(void * pvParameters) {
         xSemaphoreTake(sysState.mutex, portMAX_DELAY);
         sysState.inputs = localInputs;
         sysState.lastPressedKey = localLastKey;
-        
-        if (knobs[octaveIdx].isPressed()) {
-            sysState.role = (sysState.role == RECEIVER) ? SENDER : RECEIVER;
-            if (sysState.role == SENDER)
-                __atomic_store_n(&currentStepSize, 0, __ATOMIC_RELAXED); // Silent Sender
-        }
+        handleSynthRole(westConnected, eastConnected);
         xSemaphoreGive(sysState.mutex);
 
         // Only the receiver updates the local sound
-        if ((sysState.role == RECEIVER) && (localStepSize != lastStepSize)) {
+        if ((sysState.role == RECEIVER) && (localStepSize != lastStepSize) && (localLastKey != -1)) {
             __atomic_store_n(&currentStepSize, localStepSize, __ATOMIC_RELAXED);
             lastStepSize = localStepSize;
         } 
@@ -313,8 +328,9 @@ void decodeTask(void * pvParameters) {
       xSemaphoreGive(sysState.mutex);
 
       if (localRole == RECEIVER) {
+          int8_t senderOctave = localRX[1];
           uint32_t localStepSize = (localRX[0] == 'P') ? stepSizes[localRX[2]] : 0;
-          int8_t shift = localRX[1] - 4;
+          int8_t shift = senderOctave - 4;
           if (shift > 0) {
             localStepSize <<= shift;
           } else if (shift < 0) {
