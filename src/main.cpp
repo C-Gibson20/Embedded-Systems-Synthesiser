@@ -6,10 +6,24 @@
 #include "Knob.h"
 #include <ES_CAN.h>
 
-/* --- TEST CONFIGURATION --- */
-// Uncomment to disable features for profiling
-#define DISABLE_THREADS 
-#define DISABLE_ISRS
+/* --- PROFILING SYSTEM --- */
+#define PROFILING_MODE           // Disables scheduler and ISRs globally
+
+#ifdef PROFILING_MODE
+  #define DISABLE_THREADS
+  #define DISABLE_ISRS
+  
+  // #define PROFILE_SCANKEYS
+  // #define PROFILE_DISPLAY
+  // #define PROFILE_DECODE
+  // #define PROFILE_KNOB
+  // #define PROFILE_CAN_TX
+
+  // #define PROFILE_SAMPLE_ISR
+  // #define PROFILE_CAN_RX_ISR
+  #define PROFILE_CAN_TX_ISR
+  // #define PROFILE_KNOB_ISR
+#endif
 /* --------------------------- */
 
 //Constants
@@ -179,20 +193,33 @@ void sampleISR() {
 }
 
 void knobISR() {
+  xSemaphoreGive(knobSemaphore);
+  #ifndef PROFILING_MODE
+  portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
   BaseType_t xHigherPriorityTaskWoken = pdFALSE;
   xSemaphoreGiveFromISR(knobSemaphore, &xHigherPriorityTaskWoken);
-  portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+  #endif
 }
 
 void CAN_RX_ISR (void) {
     std::array<uint8_t, 8> RX_Message_ISR;
     uint32_t ID;
+    #ifdef PROFILING_MODE
+    RX_Message_ISR = {'P', 4, 1, 0, 0, 0, 0, 0}; 
+    ID = 0x123;
+    xQueueSend(msgInQ, RX_Message_ISR.data(), 0);
+    #else
     CAN_RX(ID, RX_Message_ISR.data());
     xQueueSendFromISR(msgInQ, RX_Message_ISR.data(), NULL);
+    #endif
 }
 
 void CAN_TX_ISR (void) {
-	xSemaphoreGiveFromISR(CAN_TX_Semaphore, NULL);
+	  #ifdef PROFILING_MODE
+    xSemaphoreGive(CAN_TX_Semaphore);
+    #else
+    xSemaphoreGiveFromISR(CAN_TX_Semaphore, NULL);
+    #endif
 }
 
 // ================================================= //
@@ -271,12 +298,17 @@ void knobTask(void * pvParameters) {
     uint8_t prevState = 0xFF;
     int8_t lastDirection = 0;
 
+    #ifndef DISABLE_THREADS
     while(1) {
         // Block until the expander interrupt triggers
         xSemaphoreTake(knobSemaphore, portMAX_DELAY);
-
+    
         // Read Expander via I2C until the pin is released high
         do {
+    #endif
+            // WCET: Perform the I2C read sequence once. 
+            // Bypass the 'while(digitalRead(PA10)==LOW)' to prevent an infinite loop during profiling.
+
             xSemaphoreTake(i2cMutex, portMAX_DELAY);
             Wire.beginTransmission(EXPANDER_ADDR);
             Wire.write(REG_INPUT);
@@ -290,9 +322,15 @@ void knobTask(void * pvParameters) {
               uint8_t bitB = (currByte >> (i * 2 + 1)) & 0x01;
               knobs[i].updateRotation(bitA, bitB);
             }
-            
+
+            #ifdef PROFILE_KNOB
+            //Add delay to account for sticky pin
+            delay(20);
+            #endif
+    #ifndef DISABLE_THREADS 
         } while (digitalRead(PA10) == LOW); // Loop if pin is stuck
     }
+    #endif
 }
 
 void scanKeysTask(void * pvParameters) {
@@ -330,7 +368,7 @@ void scanKeysTask(void * pvParameters) {
         uint32_t localStepSize = 0;
         int localLastKey = -1;
 
-        #ifdef TEST_SCANKEYS
+        #ifdef PROFILE_SCANKEYS
             // WCET: Force 12 messages to be sent every time regardless of actual state
             for (int i = 0; i < 12; i++) {
                 TX_Message[0] = 'P'; // Force "Pressed" status
@@ -362,16 +400,28 @@ void scanKeysTask(void * pvParameters) {
 }
 
 void decodeTask(void * pvParameters) {
+  #ifndef DISABLE_THREADS
   std::array<uint8_t, 8> localRX;
-
+  
   while (1) {
       // Block until message available in queue
       xQueueReceive(msgInQ, localRX.data(), portMAX_DELAY);
+  #else
+  // Initialize with a worst-case index (e.g., key 11)
+  std::array<uint8_t, 8> localRX = {'P', 4, 11, 0, 0, 0, 0, 0};
+  #endif
 
       xSemaphoreTake(sysState.mutex, portMAX_DELAY);
       SynthRole localRole = sysState.role;
       xSemaphoreGive(sysState.mutex);
 
+      #ifdef PROFILE_DECODE
+      int8_t senderOctave = localRX[1];
+      uint32_t localStepSize = stepSizes[localRX[2]];
+      localStepSize <<= 1; // Force a shift operation
+
+      __atomic_store_n(&currentStepSize, localStepSize, __ATOMIC_RELAXED);
+      #else
       if (localRole == RECEIVER) {
           int8_t senderOctave = localRX[1];
           uint32_t localStepSize = (localRX[0] == 'P') ? stepSizes[localRX[2]] : 0;
@@ -385,24 +435,36 @@ void decodeTask(void * pvParameters) {
           sysState.RX_Message = localRX;
           xSemaphoreGive(sysState.mutex);
       }
+      #endif
+  #ifndef DISABLE_THREADS
   }
+  #endif
 }
 
 void CAN_TX_Task (void * pvParameters) {
+  #ifndef DISABLE_THREADS
 	std::array<uint8_t, 8> msgOut;
 	while (1) {
 		xQueueReceive(msgOutQ, msgOut.data(), portMAX_DELAY);
 		xSemaphoreTake(CAN_TX_Semaphore, portMAX_DELAY);
+  #else
+  std::array<uint8_t, 8> msgOut = {0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55};
+  #endif
 		CAN_TX(0x123, msgOut.data());
+  #ifndef DISABLE_THREADS
 	}
+  #endif
 }
 
 void displayUpdateTask(void * pvParameters) {
     const TickType_t xFrequency = displayInterval/portTICK_PERIOD_MS;
     TickType_t xLastWakeTime = xTaskGetTickCount();
 
-    while (1) {
+    #ifndef DISABLE_THREADS
+    while (1) { // Standard RTOS mode
       vTaskDelayUntil( &xLastWakeTime, xFrequency );
+    #endif
+    
 
       xSemaphoreTake(sysState.mutex, portMAX_DELAY);
       std::bitset<32> localInputs = sysState.inputs;
@@ -417,14 +479,21 @@ void displayUpdateTask(void * pvParameters) {
       u8g2.setFont(u8g2_font_ncenB08_tr); 
       u8g2.setCursor(2,10);
 
+      #ifdef PROFILE_DISPLAY
+      u8g2.print("FFFFFFFF Note: G#"); // Max length string
+      u8g2.setCursor(2, 20);
+      u8g2.print("K: 8, 8, Oct: 8, Vol: 8"); // Max value strings
+      u8g2.setCursor(2,30);
+      u8g2.print("FFF"); // Max length string
+      u8g2.setCursor(50,30);
+      u8g2.print("Role: SENDER");
+      #else
       // Print the state of the first 12 keys as a Hex value
       u8g2.print(localInputs.to_ulong(), HEX); 
-
       u8g2.print("  Note: ");
       if (localLastKey != -1) {
           u8g2.print(noteNames[localLastKey]);
       }
-
       u8g2.setCursor(2, 20);
       u8g2.print("K: "); 
       for (int i = 0; i < 2; i++) {
@@ -435,22 +504,23 @@ void displayUpdateTask(void * pvParameters) {
       u8g2.print(knobs[octaveIdx].getValue());
       u8g2.print(", Vol: "); 
       u8g2.print(knobs[volumeIdx].getValue());
-
       u8g2.setCursor(2,30);
       u8g2.print((char) localMsg[0]);
       u8g2.print(localMsg[1]);
       u8g2.print(localMsg[2]);
-
       u8g2.setCursor(50,30);
       u8g2.print("Role: ");
       u8g2.print((role == SENDER) ? "S": "R");
+      #endif
       
       u8g2.sendBuffer();
       xSemaphoreGive(i2cMutex);
 
       //Toggle LED
       digitalToggle(LED_BUILTIN);
+    #ifndef DISABLE_THREADS
     }
+    #endif
 }
 
 // ================================================= //
@@ -613,26 +683,112 @@ void setup() {
 // ================================================= //
 
 void loop() {
-    #ifdef DISABLE_THREADS
+    #ifdef PROFILING_MODE
+    uint32_t startTime = 0;
+    uint32_t endTime = 0;
+    const int iterations = 32;
+
+    #ifdef PROFILE_SCANKEYS
     xQueueReset(msgOutQ);
 
-    uint32_t startTime = micros();
+    startTime = micros();
 
-    const int iterations = 32;
     for(int i = 0; i < iterations; i++){
       scanKeysTask(NULL);
     }
 
-    uint32_t endTime = micros();
-    float totalTime = endTime - startTime;
+    endTime = micros();
+    Serial.print("scanKeys ");
+    
+    #endif
 
-    Serial.print("Total Time (32 runs): ");
-    Serial.print(totalTime);
-    Serial.println(" us");
+    #ifdef PROFILE_DISPLAY
+    startTime = micros();
+    for(int i = 0; i < iterations; i++) {
+      displayUpdateTask(NULL);
+    }
+    endTime = micros();
+    Serial.print("DisplayUpdate ");
+    #endif
+
+    #ifdef PROFILE_DECODE
+    // Pre-fill the queue so decodeTask has something to "process" even if scheduler is off
+    uint8_t dummyMsg[8] = {'P', 4, 1, 0, 0, 0, 0, 0};
+    for(int i = 0; i < iterations; i++) {
+      xQueueSend(msgInQ, dummyMsg, 0);
+    }
+    
+    startTime = micros();
+    for(int i = 0; i < iterations; i++) {
+      decodeTask(NULL);
+    }
+    endTime = micros();
+    Serial.print("DecodeTask ");
+    #endif
+
+    #ifdef PROFILE_KNOB
+    startTime = micros();
+    for(int i = 0; i < iterations; i++) {
+      knobTask(NULL);
+    }
+    endTime = micros();
+    Serial.print("KnobTask ");
+    #endif
+
+    #ifdef PROFILE_CAN_TX
+    startTime = micros();
+    for(int i = 0; i < iterations; i++) {
+      CAN_TX_Task(NULL);
+    }
+    endTime = micros();
+    Serial.print("CAN_TX_Task ");
+    #endif
+
+    #ifdef PROFILE_SAMPLE_ISR
+    startTime = micros();
+    for(int i = 0; i < iterations; i++) {
+        sampleISR();
+    }
+    endTime = micros();
+    Serial.print("SampleISR ");
+    #endif
+
+    #ifdef PROFILE_CAN_RX_ISR
+    xQueueReset(msgInQ);
+    startTime = micros();
+    for(int i = 0; i < iterations; i++) {
+        CAN_RX_ISR();
+    }
+    endTime = micros();
+    Serial.print("CAN_RX_ISR ");
+    #endif
+
+    #ifdef PROFILE_CAN_TX_ISR
+    vSemaphoreDelete(CAN_TX_Semaphore);
+    CAN_TX_Semaphore = xSemaphoreCreateCounting(255, 0);
+    startTime = micros();
+    for(int i = 0; i < iterations; i++) {
+        CAN_TX_ISR();
+    }
+    endTime = micros();
+    Serial.print("CAN_TX_ISR ");
+    #endif
+
+    #ifdef PROFILE_KNOB_ISR
+    xSemaphoreTake(knobSemaphore, 0);
+    startTime = micros();
+    for(int i = 0; i < iterations; i++) {
+        knobISR();
+    }
+    endTime = micros();
+    Serial.print("KnobISR ");
+    #endif
+
+    float totalTime = endTime - startTime;
     Serial.print("Average WCET: ");
     Serial.print(totalTime / iterations);
     Serial.println(" us");
 
-    while(1);
+    while(1); // Stop execution
     #endif
 }
