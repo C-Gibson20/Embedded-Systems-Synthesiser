@@ -13,9 +13,9 @@
   const uint8_t EXPANDER_ADDR = 0x21;
   const uint8_t REG_INPUT = 0x00;
   const uint8_t REG_PULL_EN = 0x43;
-  const uint8_t REG_PULL_SEL = 0x45;
-  const uint8_t REG_LAT_EN = 0x47;
-  const uint8_t REG_INT_MASK = 0x4B;
+  const uint8_t REG_PULL_SEL = 0x44; 
+  const uint8_t REG_LAT_EN = 0x42;   
+  const uint8_t REG_INT_MASK = 0x45; 
 
   //Music Data
   const double fs = 22000.0;
@@ -257,7 +257,12 @@ void displayUpdateTask(void * pvParameters) {
       }
 
       u8g2.setCursor(0, 30);
-      u8g2.print("Volume: "); 
+      u8g2.print("K0-2: "); 
+      for (int i = 0; i < 3; i++) {
+          u8g2.print(knobs[i].getValue());
+          u8g2.print(", "); 
+      }
+      u8g2.print("Vol: "); 
       u8g2.print(knobs[volumeIdx].getValue());
       
       u8g2.sendBuffer();
@@ -310,7 +315,7 @@ void setup() {
   pinMode(JOYX_PIN, INPUT);
   pinMode(JOYY_PIN, INPUT);
 
-  pinMode(PA10, INPUT);
+  pinMode(PA10, INPUT_PULLUP);
 
   //Initialise display
   setOutMuxBit(DRST_BIT, LOW);  //Assert display logic reset
