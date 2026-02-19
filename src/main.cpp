@@ -242,9 +242,10 @@ void constructAndSendTXMessage(
     int octave = knobs[octaveIdx].getValue();
 
     if (isPressed) {
+        localStepSize = stepSizes[keyIdx];
         int8_t shift = octave - 4;
         if (shift > 0) localStepSize <<= shift; 
-        else if (shift < 0) localStepSize >>= (-shift);
+        else if (shift < 0) localStepSize >>= abs(shift);
         localLastKey = keyIdx;
     }
 
@@ -332,7 +333,7 @@ void scanKeysTask(void * pvParameters) {
         xSemaphoreGive(sysState.mutex);
 
         // Only the receiver updates the local sound
-        if ((sysState.role == RECEIVER) && (localStepSize != lastStepSize) && (localLastKey != -1)) {
+        if ((sysState.role == RECEIVER) && (localStepSize != lastStepSize)) {
             __atomic_store_n(&currentStepSize, localStepSize, __ATOMIC_RELAXED);
             lastStepSize = localStepSize;
         } 
@@ -355,7 +356,7 @@ void decodeTask(void * pvParameters) {
           uint32_t localStepSize = (localRX[0] == 'P') ? stepSizes[localRX[2]] : 0;
           int8_t shift = senderOctave - 4;
           if (shift > 0) localStepSize <<= shift; 
-          else if (shift < 0) localStepSize >>= (-shift);
+          else if (shift < 0) localStepSize >>= abs(shift);
 
           __atomic_store_n(&currentStepSize, localStepSize, __ATOMIC_RELAXED);
 
