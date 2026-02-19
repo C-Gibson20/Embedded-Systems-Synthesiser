@@ -190,7 +190,7 @@ void CAN_TX_ISR (void) {
 }
 
 // ================================================= //
-// ===================== Tasks ===================== //
+// ================== Task Helpers ================= //
 // ================================================= //
 
 void handleSynthRole(bool westConnected, bool eastConnected) {
@@ -209,6 +209,56 @@ void handleSynthRole(bool westConnected, bool eastConnected) {
         __atomic_store_n(&currentStepSize, 0, __ATOMIC_RELAXED); // Silent Sender
     }
 }
+
+void updateSwitchesAndConnections(std::bitset<4> cols, uint8_t rowIdx, bool &westConnected, bool &eastConnected) {
+    if (rowIdx == 5) {
+        westConnected = (cols[3] == 0);
+        knobs[0].updateSwitch(cols[0]); // C0: Knob 0 S
+        knobs[3].updateSwitch(cols[1]); // C1: Knob 3 S
+    } else if (rowIdx == 6) {
+        eastConnected = (cols[3] == 0);
+        knobs[1].updateSwitch(cols[0]); // C0: Knob 1 S
+        knobs[2].updateSwitch(cols[1]); // C1: Knob 2 S
+    }
+}
+
+void mapColumnsToSet(std::bitset<32> &localInputs, std::bitset<4> cols, uint8_t rowIdx) {
+    int offset = rowIdx * 4;
+    for (int bit = 0; bit < 4; bit++) {
+        localInputs[offset + bit] = cols[bit];
+    }
+}
+
+void constructAndSendTXMessage(
+  std::bitset<32> localInputs, 
+  std::bitset<32> prevInputs, 
+  uint8_t keyIdx, 
+  std::array<uint8_t, 8> &TX_Message,
+  uint32_t &localStepSize,
+  int &localLastKey
+) {
+    bool isPressed = (localInputs[keyIdx] == 0);
+    bool wasPressed = (prevInputs[keyIdx] == 0);
+    int octave = knobs[octaveIdx].getValue();
+
+    if (isPressed) {
+        int8_t shift = octave - 4;
+        if (shift > 0) localStepSize <<= shift; 
+        else if (shift < 0) localStepSize >>= (-shift);
+        localLastKey = keyIdx;
+    }
+
+    if (isPressed != wasPressed) {
+        TX_Message[0] = isPressed ? 'P' : 'R';
+        TX_Message[1] = octave;
+        TX_Message[2] = keyIdx;
+        xQueueSend(msgOutQ, TX_Message.data(), portMAX_DELAY);
+    }
+}
+
+// ================================================= //
+// ===================== Tasks ===================== //
+// ================================================= //
 
 void knobTask(void * pvParameters) {
     uint8_t prevState = 0xFF;
@@ -260,46 +310,19 @@ void scanKeysTask(void * pvParameters) {
             delayMicroseconds(3);
             std::bitset<4> cols = readCols();
 
-            // Map rows 5 and 6 to the knob objects
-            if (i == 5) {
-                westConnected = (cols[3] == 0);
-                knobs[0].updateSwitch(cols[0]); // C0: Knob 0 S
-                knobs[3].updateSwitch(cols[1]); // C1: Knob 3 S
-            } else if (i == 6) {
-                eastConnected = (cols[3] == 0);
-                knobs[1].updateSwitch(cols[0]); // C0: Knob 1 S
-                knobs[2].updateSwitch(cols[1]); // C1: Knob 2 S
-            }
+            // Map rows 5 and 6 to knob switches
+            // and updates east and west connections
+            updateSwitchesAndConnections(cols, i, westConnected, eastConnected);
 
             // Map columns into 32-bit set
-            int offset = i * 4;
-            for (int bit = 0; bit < 4; bit++) {
-                localInputs[offset + bit] = cols[bit];
-            }
+            mapColumnsToSet(localInputs, cols, i);
         }
 
         uint32_t localStepSize = 0;
         int localLastKey = -1;
-        
         for (int i = 0; i < 12; i++) {
-            // Compare current state to previous state for this specific key
-            bool isPressed = (localInputs[i] == 0);
-            bool wasPressed = (prevInputs[i] == 0);
-            int octave = knobs[octaveIdx].getValue();
-
-            if (isPressed) {
-                localStepSize = stepSizes[i] << (octave - 4);
-                localLastKey = i;
-            }
-
-            if (isPressed != wasPressed) {
-                TX_Message[0] = isPressed ? 'P' : 'R';
-                TX_Message[1] = octave;
-                TX_Message[2] = i;
-                xQueueSend(msgOutQ, TX_Message.data(), portMAX_DELAY);
-            }
+            constructAndSendTXMessage(localInputs, prevInputs, i, TX_Message, localStepSize, localLastKey);
         }
-
         prevInputs = localInputs;
 
         xSemaphoreTake(sysState.mutex, portMAX_DELAY);
@@ -331,11 +354,8 @@ void decodeTask(void * pvParameters) {
           int8_t senderOctave = localRX[1];
           uint32_t localStepSize = (localRX[0] == 'P') ? stepSizes[localRX[2]] : 0;
           int8_t shift = senderOctave - 4;
-          if (shift > 0) {
-            localStepSize <<= shift;
-          } else if (shift < 0) {
-            localStepSize >>= (-shift);
-          }
+          if (shift > 0) localStepSize <<= shift; 
+          else if (shift < 0) localStepSize >>= (-shift);
 
           __atomic_store_n(&currentStepSize, localStepSize, __ATOMIC_RELAXED);
 
