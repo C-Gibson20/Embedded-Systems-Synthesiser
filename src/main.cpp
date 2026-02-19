@@ -7,11 +7,11 @@
 #include <ES_CAN.h>
 
 /* --- PROFILING SYSTEM --- */
-#define PROFILING_MODE           // Disables scheduler and ISRs globally
+// #define PROFILING_MODE           // Disables scheduler and ISRs globally
 
 #ifdef PROFILING_MODE
-  #define DISABLE_THREADS
-  #define DISABLE_ISRS
+  // #define DISABLE_THREADS
+  // #define DISABLE_ISRS
   
   // #define PROFILE_SCANKEYS
   // #define PROFILE_DISPLAY
@@ -21,7 +21,7 @@
 
   // #define PROFILE_SAMPLE_ISR
   // #define PROFILE_CAN_RX_ISR
-  #define PROFILE_CAN_TX_ISR
+  // #define PROFILE_CAN_TX_ISR
   // #define PROFILE_KNOB_ISR
 #endif
 /* --------------------------- */
@@ -193,11 +193,12 @@ void sampleISR() {
 }
 
 void knobISR() {
+  #ifdef PROFILING_MODE
   xSemaphoreGive(knobSemaphore);
-  #ifndef PROFILING_MODE
-  portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+  #else
   BaseType_t xHigherPriorityTaskWoken = pdFALSE;
   xSemaphoreGiveFromISR(knobSemaphore, &xHigherPriorityTaskWoken);
+  portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
   #endif
 }
 
