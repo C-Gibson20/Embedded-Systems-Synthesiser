@@ -6,6 +6,12 @@
 #include "Knob.h"
 #include <ES_CAN.h>
 
+/* --- TEST CONFIGURATION --- */
+// Uncomment to disable features for profiling
+#define DISABLE_THREADS 
+#define DISABLE_ISRS
+/* --------------------------- */
+
 //Constants
   const uint32_t displayInterval = 100; 
   const uint32_t scanInterval = 20;
@@ -299,8 +305,10 @@ void scanKeysTask(void * pvParameters) {
     static bool westConnected = false;
     static bool eastConnected = false;
 
+    #ifndef DISABLE_THREADS
     while (1) {
         vTaskDelayUntil( &xLastWakeTime, xFrequency );
+    #endif
 
         // Key scanning loop for Rows 0-2
         std::bitset<32> localInputs;
@@ -321,9 +329,20 @@ void scanKeysTask(void * pvParameters) {
 
         uint32_t localStepSize = 0;
         int localLastKey = -1;
+
+        #ifdef TEST_SCANKEYS
+            // WCET: Force 12 messages to be sent every time regardless of actual state
+            for (int i = 0; i < 12; i++) {
+                TX_Message[0] = 'P'; // Force "Pressed" status
+                TX_Message[1] = 4;   // Fixed octave
+                TX_Message[2] = i;   // Key index
+                xQueueSend(msgOutQ, TX_Message.data(), 0); // Non-blocking send
+            }
+        #else
         for (int i = 0; i < 12; i++) {
             constructAndSendTXMessage(localInputs, prevInputs, i, TX_Message, localStepSize, localLastKey);
         }
+        #endif
         prevInputs = localInputs;
 
         xSemaphoreTake(sysState.mutex, portMAX_DELAY);
@@ -337,7 +356,9 @@ void scanKeysTask(void * pvParameters) {
             __atomic_store_n(&currentStepSize, localStepSize, __ATOMIC_RELAXED);
             lastStepSize = localStepSize;
         } 
+    #ifndef DISABLE_THREADS
     }
+    #endif
 }
 
 void decodeTask(void * pvParameters) {
@@ -490,12 +511,16 @@ void initialiseDisplay() {
 void initialiseCANBus() {
     CAN_Init(true);
     setCANFilter(0x123,0x7ff);
+
+    #ifndef DISABLE_ISRS
     CAN_RegisterRX_ISR(CAN_RX_ISR);
     CAN_RegisterTX_ISR(CAN_TX_ISR);
+    #endif
+    
     CAN_Start();
 
     msgInQ = xQueueCreate(36, 8);
-    msgOutQ = xQueueCreate(36, 8);
+    msgOutQ = xQueueCreate(384, 8); // Increased to hold 32 iterations of 12 key messages
 
     CAN_TX_Semaphore = xSemaphoreCreateCounting(3,3);
 }
@@ -515,16 +540,23 @@ void initialisePCAL6408A() {
     }
     clearInterruptAndSync(EXPANDER_ADDR, 0x00); 
     
+    #ifndef DISABLE_ISRS
     attachInterrupt(digitalPinToInterrupt(PA10), knobISR, FALLING); 
+    #endif
 }
 
 void initialiseHardwareTimer() {
     sampleTimer.setOverflow(22000, HERTZ_FORMAT);
+
+    #ifndef DISABLE_ISRS
     sampleTimer.attachInterrupt(sampleISR);
+    #endif
+
     sampleTimer.resume();
 }
 
 void initialiseThreads() {
+    #ifndef DISABLE_THREADS
     TaskHandle_t scanKeysHandle = NULL;
     TaskHandle_t knobHandle = NULL;
     TaskHandle_t decodeHandle = NULL;
@@ -535,6 +567,7 @@ void initialiseThreads() {
     xTaskCreate(displayUpdateTask, "displayUpdate", 256, NULL, 1, &displayUpdateHandle);
     xTaskCreate(decodeTask, "decode", 128, NULL, 2, &decodeHandle);
     xTaskCreate(CAN_TX_Task, "canTX", 128, NULL, 2, &canTxHandle);
+    #endif
 }
 
 // ================================================= //
@@ -569,8 +602,10 @@ void setup() {
   //Initialise and run threads
   initialiseThreads();
 
+  #ifndef DISABLE_THREADS
   //Start RTOS scheduler
   vTaskStartScheduler();
+  #endif
 }
 
 // ================================================= //
@@ -578,5 +613,26 @@ void setup() {
 // ================================================= //
 
 void loop() {
-  
+    #ifdef DISABLE_THREADS
+    xQueueReset(msgOutQ);
+
+    uint32_t startTime = micros();
+
+    const int iterations = 32;
+    for(int i = 0; i < iterations; i++){
+      scanKeysTask(NULL);
+    }
+
+    uint32_t endTime = micros();
+    float totalTime = endTime - startTime;
+
+    Serial.print("Total Time (32 runs): ");
+    Serial.print(totalTime);
+    Serial.println(" us");
+    Serial.print("Average WCET: ");
+    Serial.print(totalTime / iterations);
+    Serial.println(" us");
+
+    while(1);
+    #endif
 }
