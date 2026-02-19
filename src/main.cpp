@@ -2,11 +2,22 @@
 #include <U8g2lib.h>
 #include <bitset>
 #include <STM32FreeRTOS.h>
+#include <Wire.h>
+#include "Knob.h"
 
 //Constants
-  const uint32_t interval = 100; //Display update interval
+  const uint32_t displayInterval = 100; 
+  const uint32_t scanInterval = 20;
   
-  //Formula
+  //PCAL6408A Registers
+  const uint8_t EXPANDER_ADDR = 0x21;
+  const uint8_t REG_INPUT = 0x00;
+  const uint8_t REG_PULL_EN = 0x43;
+  const uint8_t REG_PULL_SEL = 0x45;
+  const uint8_t REG_LAT_EN = 0x47;
+  const uint8_t REG_INT_MASK = 0x4B;
+
+  //Music Data
   const double fs = 22000.0;
   const double pow2_32 = 4294967296.0;
 
@@ -33,10 +44,25 @@
       (uint32_t)(f_notes[11] * pow2_32 / fs)
   };
 
+  //Shared state
   volatile uint32_t currentStepSize = 0;
 
-  //Tuning
-  volatile int currentVolumeShift = 2;
+  struct {
+      std::bitset<32> inputs;
+      int lastPressedKey = -1;
+      SemaphoreHandle_t mutex;
+  } sysState;
+
+  SemaphoreHandle_t i2cMutex; 
+  SemaphoreHandle_t knobSemaphore;
+
+  Knob knobs[4] = {
+      Knob(0, 0, 8),
+      Knob(0, 0, 8),
+      Knob(0, 0, 8),
+      Knob(2, 0, 8)  
+  };
+  const uint8_t volumeIdx = 3;
 
 //Pin definitions
   //Row select and enable
@@ -73,14 +99,6 @@ U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2(U8G2_R0);
 //Hardware Timer
 HardwareTimer sampleTimer(TIM1);
 
-// Stores system state used in more than one thread
-struct {
-    std::bitset<32> inputs;
-    int lastPressedKey = -1;
-    int knobRotation = 2;
-    SemaphoreHandle_t mutex;
-} sysState;
-
 //Function to set outputs using key matrix
 void setOutMuxBit(const uint8_t bitIdx, const bool value) {
       digitalWrite(REN_PIN,LOW);
@@ -116,71 +134,79 @@ void setRow(uint8_t rowIdx){
     digitalWrite(RA1_PIN, rowIdx & 0x02);
     digitalWrite(RA2_PIN, rowIdx & 0x04);
 
+    // Latch for KNOB_MODE
+    digitalWrite(OUT_PIN, (rowIdx == 2) ? LOW : HIGH);
+
     // Set Row Select Enable High
     digitalWrite(REN_PIN, HIGH);
+    delayMicroseconds(2);
 }
 
 void sampleISR() {
     static uint32_t phaseAcc = 0;
-    uint32_t localStepSize;
-    int localVolumeShift;
-
-    localStepSize = __atomic_load_n(&currentStepSize, __ATOMIC_RELAXED);
-    localVolumeShift = __atomic_load_n(&currentVolumeShift, __ATOMIC_RELAXED);
+    uint32_t localStepSize = __atomic_load_n(&currentStepSize, __ATOMIC_RELAXED);
+    int localVolumeShift = knobs[volumeIdx].getValueISR();
     
     phaseAcc += localStepSize;
-
     int32_t Vout = (phaseAcc >> 24) - 128;
     Vout = Vout >> (8 - localVolumeShift); 
     analogWrite(OUTR_PIN, Vout + 128);
 }
 
-void scanKeysTask(void * pvParameters) {
-    const TickType_t xFrequency = 20/portTICK_PERIOD_MS;
-    TickType_t xLastWakeTime = xTaskGetTickCount();
+void knobISR() {
+  BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+  xSemaphoreGiveFromISR(knobSemaphore, &xHigherPriorityTaskWoken);
+  portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+}
 
-    uint8_t prevState = 0b11;
+void knobTask(void * pvParameters) {
+    uint8_t prevState = 0xFF;
     int8_t lastDirection = 0;
+
+    while(1) {
+        // Block until the expander interrupt triggers
+        xSemaphoreTake(knobSemaphore, portMAX_DELAY);
+
+        // Read Expander via I2C until the pin is released high
+        do {
+            xSemaphoreTake(i2cMutex, portMAX_DELAY);
+            Wire.beginTransmission(EXPANDER_ADDR);
+            Wire.write(REG_INPUT);
+            Wire.endTransmission();
+            Wire.requestFrom(EXPANDER_ADDR, (uint8_t)1);
+            uint8_t currByte = Wire.read();
+            xSemaphoreGive(i2cMutex);
+
+            for (int i = 0; i < 4; i++) {
+              uint8_t bitA = (currByte >> (i * 2)) & 0x01;
+              uint8_t bitB = (currByte >> (i * 2 + 1)) & 0x01;
+              knobs[i].update(bitA, bitB);
+            }
+
+            delayMicroseconds(10);
+        } while (digitalRead(PA10) == LOW); // Loop if pin is stuck
+    }
+}
+
+void scanKeysTask(void * pvParameters) {
+    const TickType_t xFrequency = scanInterval/portTICK_PERIOD_MS;
+    TickType_t xLastWakeTime = xTaskGetTickCount();
 
     while (1) {
         vTaskDelayUntil( &xLastWakeTime, xFrequency );
 
+        // Key scanning loop for Rows 0-2
         std::bitset<32> localInputs;
-        int localRotationChange = 0;
-
-        // Key scanning loop for Rows 0-3
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < 3; i++) {
             setRow(i);
             delayMicroseconds(3);
-
             std::bitset<4> cols = readCols();
-            
+        
             // Map columns into 32-bit set
             int offset = i * 4;
             for (int bit = 0; bit < 4; bit++) {
                 localInputs[offset + bit] = cols[bit];
             }
-        }
-
-        // Decode Knob 3
-        uint8_t currA = localInputs[12];
-        uint8_t currB = localInputs[13];
-        uint8_t currState = (currB << 1) | currA;
-
-        // Apply state transation table logic
-        if (prevState != currState) {
-            if ((currState ^ prevState) == 0b11) {
-                localRotationChange = lastDirection;
-            }
-            else if ((prevState == 0b00 && currState == 0b01) || (prevState == 0b11 && currState == 0b10)) {
-                localRotationChange = 1;
-                lastDirection = 1;
-            } 
-            else if ((prevState == 0b01 && currState == 0b00) || (prevState == 0b10 && currState == 0b11)) {
-                localRotationChange = -1;
-                lastDirection = -1;
-            }
-            prevState = currState;
         }
 
         uint32_t localStepSize = 0;
@@ -197,36 +223,31 @@ void scanKeysTask(void * pvParameters) {
         xSemaphoreTake(sysState.mutex, portMAX_DELAY);
         sysState.inputs = localInputs;
         sysState.lastPressedKey = localLastKey;
-        
-        int rawNewValue = sysState.knobRotation + localRotationChange;
-        sysState.knobRotation = std::clamp(rawNewValue, 0, 8);
-        int localKnob = sysState.knobRotation;
         xSemaphoreGive(sysState.mutex);
 
         __atomic_store_n(&currentStepSize, localStepSize, __ATOMIC_RELAXED);
-        __atomic_store_n(&currentVolumeShift, localKnob, __ATOMIC_RELAXED);
     }
 }
 
 void displayUpdateTask(void * pvParameters) {
-    const TickType_t xFrequency = 100/portTICK_PERIOD_MS;
+    const TickType_t xFrequency = displayInterval/portTICK_PERIOD_MS;
     TickType_t xLastWakeTime = xTaskGetTickCount();
 
     while (1) {
       vTaskDelayUntil( &xLastWakeTime, xFrequency );
 
+      xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+      std::bitset<32> localInputs = sysState.inputs;
+      int localLastKey = sysState.lastPressedKey;
+      xSemaphoreGive(sysState.mutex);
+
       //Update display
+      xSemaphoreTake(i2cMutex, portMAX_DELAY);
       u8g2.clearBuffer();                 
       u8g2.setFont(u8g2_font_ncenB08_tr); 
       u8g2.setCursor(2,10);
 
       // Print the state of the first 12 keys as a Hex value
-      xSemaphoreTake(sysState.mutex, portMAX_DELAY);
-      std::bitset<32> localInputs = sysState.inputs;
-      int localLastKey = sysState.lastPressedKey;
-      int localKnob = sysState.knobRotation;
-      xSemaphoreGive(sysState.mutex);
-
       u8g2.print(localInputs.to_ulong(), HEX); 
 
       u8g2.setCursor(0, 20);
@@ -236,13 +257,36 @@ void displayUpdateTask(void * pvParameters) {
       }
 
       u8g2.setCursor(0, 30);
-      u8g2.print("K:"); 
-      u8g2.print(localKnob);
+      u8g2.print("Volume: "); 
+      u8g2.print(knobs[volumeIdx].getValue());
       
       u8g2.sendBuffer();
+      xSemaphoreGive(i2cMutex);
 
       //Toggle LED
       digitalToggle(LED_BUILTIN);
+    }
+}
+
+void wireWrites(uint8_t enableAddress, uint8_t writeVal) {
+    Wire.beginTransmission(EXPANDER_ADDR); 
+    Wire.write(enableAddress); 
+    Wire.write(writeVal); 
+    Wire.endTransmission();
+}
+
+void clearInterruptAndSync(uint8_t address, uint8_t writeVal) {
+    Wire.beginTransmission(address);
+    Wire.write(writeVal);            
+    Wire.endTransmission();
+    Wire.requestFrom(address, (uint8_t)1);
+    if (Wire.available()) {
+        uint8_t startByte = Wire.read();   
+        for (int i = 0; i < 4; i++) {
+          uint8_t bitA = (startByte >> (i * 2)) & 0x01;
+          uint8_t bitB = (startByte >> (i * 2 + 1)) & 0x01;
+          knobs[i].setInitialState(bitA, bitB); // Give the class reality!
+      }    
     }
 }
 
@@ -266,20 +310,38 @@ void setup() {
   pinMode(JOYX_PIN, INPUT);
   pinMode(JOYY_PIN, INPUT);
 
+  pinMode(PA10, INPUT);
+
   //Initialise display
   setOutMuxBit(DRST_BIT, LOW);  //Assert display logic reset
   delayMicroseconds(2);
   setOutMuxBit(DRST_BIT, HIGH);  //Release display logic reset
   u8g2.begin();
   setOutMuxBit(DEN_BIT, HIGH);  //Enable display power supply
-  setOutMuxBit(KNOB_MODE, HIGH);  //Read knobs through key matrix
+  setOutMuxBit(KNOB_MODE, LOW);  //Do not read knobs through key matrix
 
   //Initialise UART
   Serial.begin(9600);
   Serial.println("Hello World");
 
+  // PCAL6408A Init (using i2cMutex)
+  i2cMutex = xSemaphoreCreateMutex();
+  sysState.mutex = xSemaphoreCreateMutex();
+  knobSemaphore = xSemaphoreCreateBinary();
+  Wire.begin();
+  
+  wireWrites(REG_PULL_EN, 0xFF);  // Enable pullups
+  wireWrites(REG_LAT_EN, 0xFF);   // Enable latch
+  wireWrites(REG_INT_MASK, 0x00); // Interrupt mask
+  
+  for (int i = 0; i < 4; i++) {
+      knobs[i].begin();
+  }
+  clearInterruptAndSync(EXPANDER_ADDR, 0x00); 
+  
+  attachInterrupt(digitalPinToInterrupt(PA10), knobISR, FALLING); // To prevent 
+
   // Initialize the atomic variables before the timer starts
-  __atomic_store_n(&currentVolumeShift, sysState.knobRotation, __ATOMIC_RELAXED);
   __atomic_store_n(&currentStepSize, 0, __ATOMIC_RELAXED);
 
   // Initialise hardware timer
@@ -287,29 +349,13 @@ void setup() {
   sampleTimer.attachInterrupt(sampleISR);
   sampleTimer.resume();
 
-  //Initialise and run thread
+  //Initialise and run threads
   TaskHandle_t scanKeysHandle = NULL;
-  xTaskCreate(
-    scanKeysTask,
-    "scanKeys",
-    64,
-    NULL,
-    2,
-    &scanKeysHandle
-  );
-
+  TaskHandle_t knobHandle = NULL;
   TaskHandle_t displayUpdateHandle = NULL;
-  xTaskCreate(
-    displayUpdateTask,
-    "displayUpdate",
-    256,
-    NULL,
-    1,
-    &displayUpdateHandle
-  );
-
-  //Create mutex and assign handle
-  sysState.mutex = xSemaphoreCreateMutex();
+  xTaskCreate(scanKeysTask, "scanKeys", 128, NULL, 2, &scanKeysHandle);
+  xTaskCreate(knobTask, "knob", 128, NULL, 3, &knobHandle);
+  xTaskCreate(displayUpdateTask, "displayUpdate", 256, NULL, 1, &displayUpdateHandle);
 
   //Start RTOS scheduler
   vTaskStartScheduler();
