@@ -47,25 +47,13 @@ void Knob::updateRotation(uint8_t currA, uint8_t currB) {
 
             int8_t newValue = current + change;
 
-            // Clamp BEFORE storing
             if (newValue > upperLimit) newValue = upperLimit;
             if (newValue < lowerLimit) newValue = lowerLimit;
 
             __atomic_store_n(&atomicRotation, newValue, __ATOMIC_RELAXED);
 
-            // Keep rotation mirrored for display
             rotation = newValue;
         }
-    }
-
-    if (change != 0) {
-        xSemaphoreTake(mutex, portMAX_DELAY);
-        rotation = std::clamp<int8_t>(rotation + change, lowerLimit, upperLimit);
-        int8_t localCopy = rotation;
-        xSemaphoreGive(mutex);
-        
-        // Sync with atomic for ISR
-        __atomic_store_n(&atomicRotation, localCopy, __ATOMIC_RELAXED);
     }
 }
 
