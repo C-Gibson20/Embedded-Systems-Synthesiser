@@ -8,7 +8,8 @@
 
 /* --- PROFILING SYSTEM --- */
 // #define PROFILING_MODE           // Disables scheduler and ISRs globally
-
+#define V1
+// #define V2
 #ifdef PROFILING_MODE
   // #define DISABLE_THREADS
   // #define DISABLE_ISRS
@@ -246,12 +247,22 @@ void handleSynthRole(bool westConnected, bool eastConnected, bool octavePressed)
 void updateSwitchesAndConnections(std::bitset<4> cols, uint8_t rowIdx, bool &westConnected, bool &eastConnected) {
     if (rowIdx == 5) {
         westConnected = (cols[3] == 0);
+        #ifdef V1
+        knobs[2].updateSwitch(cols[0]); // C0: Knob 0 S
+        knobs[3].updateSwitch(cols[1]); // C1: Knob 3 S
+        #elifdef V2
         knobs[0].updateSwitch(cols[0]); // C0: Knob 0 S
         knobs[3].updateSwitch(cols[1]); // C1: Knob 3 S
+        #endif
     } else if (rowIdx == 6) {
         eastConnected = (cols[3] == 0);
+        #ifdef V1
+        knobs[0].updateSwitch(cols[0]); // C0: Knob 1 S
+        knobs[1].updateSwitch(cols[1]); // C1: Knob 2 S
+        #elifdef V2
         knobs[1].updateSwitch(cols[0]); // C0: Knob 1 S
         knobs[2].updateSwitch(cols[1]); // C1: Knob 2 S
+        #endif
     }
 }
 
