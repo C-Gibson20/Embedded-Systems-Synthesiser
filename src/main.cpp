@@ -79,8 +79,7 @@ struct {
     SemaphoreHandle_t mutex;
 } sysState;
 
-SemaphoreHandle_t i2cMutex; 
-SemaphoreHandle_t knobSemaphore;
+// SemaphoreHandle_t knobSemaphore;
 SemaphoreHandle_t CAN_TX_Semaphore;
 
 Knob knobs[4] = {
@@ -295,45 +294,6 @@ void constructAndSendTXMessage(
 // ===================== Tasks ===================== //
 // ================================================= //
 
-// void knobTask(void * pvParameters) {
-//     uint8_t prevState = 0xFF;
-//     int8_t lastDirection = 0;
-
-//     #ifndef DISABLE_THREADS
-//     while(1) {
-//         // Block until the expander interrupt triggers
-//         xSemaphoreTake(knobSemaphore, portMAX_DELAY);
-    
-//         // Read Expander via I2C until the pin is released high
-//         do {
-//     #endif
-//             // WCET: Perform the I2C read sequence once. 
-//             // Bypass the 'while(digitalRead(PA10)==LOW)' to prevent an infinite loop during profiling.
-
-//             xSemaphoreTake(i2cMutex, portMAX_DELAY);
-//             Wire.beginTransmission(EXPANDER_ADDR);
-//             Wire.write(REG_INPUT);
-//             Wire.endTransmission();
-//             Wire.requestFrom(EXPANDER_ADDR, (uint8_t)1);
-//             uint8_t currByte = Wire.read();
-//             xSemaphoreGive(i2cMutex);
-
-//             for (int i = 0; i < 4; i++) {
-//               uint8_t bitA = (currByte >> (i * 2)) & 0x01;
-//               uint8_t bitB = (currByte >> (i * 2 + 1)) & 0x01;
-//               knobs[i].updateRotation(bitA, bitB);
-//             }
-
-//             #ifdef PROFILE_KNOB
-//             //Add delay to account for sticky pin
-//             delay(20);
-//             #endif
-//     #ifndef DISABLE_THREADS 
-//         } while (digitalRead(PA10) == LOW); // Loop if pin is stuck
-//     }
-//     #endif
-// }
-
 void scanKeysTask(void * pvParameters) {
     const TickType_t xFrequency = scanInterval/portTICK_PERIOD_MS;
     TickType_t xLastWakeTime = xTaskGetTickCount();
@@ -485,7 +445,6 @@ void displayUpdateTask(void * pvParameters) {
       xSemaphoreGive(sysState.mutex);
       
       //Update display
-      xSemaphoreTake(i2cMutex, portMAX_DELAY);
       u8g2.clearBuffer();                 
       u8g2.setFont(u8g2_font_ncenB08_tr); 
       u8g2.setCursor(2,10);
@@ -525,7 +484,6 @@ void displayUpdateTask(void * pvParameters) {
       #endif
       
       u8g2.sendBuffer();
-      xSemaphoreGive(i2cMutex);
 
       //Toggle LED
       digitalToggle(LED_BUILTIN);
@@ -546,18 +504,6 @@ void wireWrites(uint8_t enableAddress, uint8_t writeVal) {
 }
 
 void clearInterruptAndSync(uint8_t address, uint8_t writeVal) {
-    // Wire.beginTransmission(address);
-    // Wire.write(writeVal);            
-    // Wire.endTransmission();
-    // Wire.requestFrom(address, (uint8_t)1);
-    // if (Wire.available()) {
-    //     uint8_t startByte = Wire.read();   
-    //     for (int i = 0; i < 4; i++) {
-    //       uint8_t bitA = (startByte >> (i * 2)) & 0x01;
-    //       uint8_t bitB = (startByte >> (i * 2 + 1)) & 0x01;
-    //       knobs[i].setInitialState(bitA, bitB); 
-    //     }    
-    // }
 
     for (int i = 0; i < 4; i++) {
         uint8_t bitA = 0b1;
@@ -593,7 +539,6 @@ void initialiseDisplay() {
     u8g2.begin();
     setOutMuxBit(DEN_BIT, HIGH);  //Enable display power supply
     setOutMuxBit(KNOB_MODE, HIGH);  //Do read knobs through key matrix
-    // setOutMuxBit(KNOB_MODE, LOW);  //Do not read knobs through key matrix
 }
 
 void initialiseCANBus() {
@@ -614,14 +559,7 @@ void initialiseCANBus() {
 }
 
 void initialisePCAL6408A() {
-    i2cMutex = xSemaphoreCreateMutex();
     sysState.mutex = xSemaphoreCreateMutex();
-    knobSemaphore = xSemaphoreCreateBinary();
-    Wire.begin();
-    
-    // wireWrites(REG_PULL_EN, 0xFF);  // Enable pullups
-    // wireWrites(REG_LAT_EN, 0xFF);   // Enable latch
-    // wireWrites(REG_INT_MASK, 0x00); // Interrupt mask
     
     for (int i = 0; i < 4; i++) {
         knobs[i].begin();
@@ -629,7 +567,6 @@ void initialisePCAL6408A() {
     clearInterruptAndSync(EXPANDER_ADDR, 0x00); 
     
     #ifndef DISABLE_ISRS
-    // attachInterrupt(digitalPinToInterrupt(PA10), knobISR, FALLING); 
     #endif
 }
 
@@ -646,12 +583,10 @@ void initialiseHardwareTimer() {
 void initialiseThreads() {
     #ifndef DISABLE_THREADS
     TaskHandle_t scanKeysHandle = NULL;
-    // TaskHandle_t knobHandle = NULL;
     TaskHandle_t decodeHandle = NULL;
     TaskHandle_t displayUpdateHandle = NULL;
     TaskHandle_t canTxHandle = NULL;
     xTaskCreate(scanKeysTask, "scanKeys", 128, NULL, 3, &scanKeysHandle);
-    // xTaskCreate(knobTask, "knob", 128, NULL, 4, &knobHandle);
     xTaskCreate(displayUpdateTask, "displayUpdate", 256, NULL, 1, &displayUpdateHandle);
     xTaskCreate(decodeTask, "decode", 128, NULL, 2, &decodeHandle);
     xTaskCreate(CAN_TX_Task, "canTX", 128, NULL, 2, &canTxHandle);
