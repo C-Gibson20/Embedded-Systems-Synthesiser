@@ -78,7 +78,8 @@ uint32_t phaseAccumulators[12] = {0};
 struct {
     SynthRole role = RECEIVER;
     std::bitset<32> inputs;
-    int lastPressedKey = -1;
+    int lastPressedKeys [12] = {-1};
+    int lastPressedKeyindex = 0;
     std::array<uint8_t, 8> RX_Message = {0};
     SemaphoreHandle_t mutex;
 } sysState;
@@ -294,7 +295,8 @@ void constructAndSendTXMessage(
   uint8_t keyIdx, 
   std::array<uint8_t, 8> &TX_Message,
   uint32_t localStepSizes [12],
-  int &localLastKey
+  uint8_t &localLastKeyIndex,
+  int localLastKeys [12]
 ) {
     bool isPressed = (localInputs[keyIdx] == 0);
     bool wasPressed = (prevInputs[keyIdx] == 0);
@@ -305,7 +307,8 @@ void constructAndSendTXMessage(
         int8_t shift = octave - 4;
         if (shift > 0) localStepSizes[keyIdx] <<= shift; 
         else if (shift < 0) localStepSizes[keyIdx] >>= abs(shift);
-        localLastKey = keyIdx;
+        localLastKeys[localLastKeyIndex] = keyIdx;
+        localLastKeyIndex ++;
     }
 
     if (isPressed != wasPressed) {
@@ -368,7 +371,8 @@ void scanKeysTask(void * pvParameters) {
         }
 
         uint32_t localStepSizes[12] = {0};
-        int localLastKey = -1;
+        int localLastKeys [12] = {-1};
+        uint8_t localLastKeyIndex = 0;
 
         #ifdef PROFILE_SCANKEYS
             // WCET: Force 12 messages to be sent every time regardless of actual state
@@ -380,7 +384,7 @@ void scanKeysTask(void * pvParameters) {
             }
         #else
         for (int i = 0; i < 12; i++) {
-            constructAndSendTXMessage(localInputs, prevInputs, i, TX_Message, localStepSizes, localLastKey);
+            constructAndSendTXMessage(localInputs, prevInputs, i, TX_Message, localStepSizes, localLastKeyIndex, localLastKeys);
         }
         #endif
         uint64_t localStepSizesSum = std::reduce(localStepSizes,localStepSizes+12,0);
@@ -389,7 +393,8 @@ void scanKeysTask(void * pvParameters) {
         bool octavePressed = knobs[octaveIdx].isPressed();
         xSemaphoreTake(sysState.mutex, portMAX_DELAY);
         sysState.inputs = localInputs;
-        sysState.lastPressedKey = localLastKey;
+        memcpy(sysState.lastPressedKeys,localLastKeys,12);
+        sysState.lastPressedKeyindex = localLastKeyIndex;
         handleSynthRole(westConnected, eastConnected, octavePressed);
         xSemaphoreGive(sysState.mutex);
 
@@ -474,7 +479,6 @@ void displayUpdateTask(void * pvParameters) {
 
       xSemaphoreTake(sysState.mutex, portMAX_DELAY);
       std::bitset<32> localInputs = sysState.inputs;
-      int localLastKey = sysState.lastPressedKey;
       std::array<uint8_t, 8> localMsg = sysState.RX_Message;
       SynthRole role = sysState.role;
       xSemaphoreGive(sysState.mutex);
@@ -494,10 +498,10 @@ void displayUpdateTask(void * pvParameters) {
       u8g2.print("Role: SENDER");
       #else
       // Print the state of the first 12 keys as a Hex value
-      u8g2.print(localInputs.to_ulong(), HEX); 
-      u8g2.print("  Note: ");
-      if (localLastKey != -1) {
-          u8g2.print(noteNames[localLastKey]);
+    //   u8g2.print(localInputs.to_ulong(), HEX);
+      u8g2.print("  Notes: ");
+      for (int i = 0; i < sysState.lastPressedKeyindex; i ++){
+        u8g2.print(noteNames[sysState.lastPressedKeys[i]]);
       }
       u8g2.setCursor(2, 20);
       u8g2.print("K: "); 
