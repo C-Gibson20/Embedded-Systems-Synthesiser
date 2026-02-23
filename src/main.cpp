@@ -226,7 +226,7 @@ void CAN_TX_ISR (void) {
 // ================== Task Helpers ================= //
 // ================================================= //
 
-void handleSynthRole(bool westConnected, bool eastConnected) {
+void handleSynthRole(bool westConnected, bool eastConnected, bool octavePressed) {
     if (westConnected || eastConnected) {
         if (!westConnected && eastConnected) {
           sysState.role = SENDER;
@@ -234,7 +234,7 @@ void handleSynthRole(bool westConnected, bool eastConnected) {
           sysState.role = RECEIVER;
         }
     }
-    else if (knobs[octaveIdx].isPressed()) {
+    else if (octavePressed) {
         sysState.role = (sysState.role == RECEIVER) ? SENDER : RECEIVER;
     }
 
@@ -354,10 +354,11 @@ void scanKeysTask(void * pvParameters) {
         #endif
         prevInputs = localInputs;
 
+        bool octavePressed = knobs[octaveIdx].isPressed();
         xSemaphoreTake(sysState.mutex, portMAX_DELAY);
         sysState.inputs = localInputs;
         sysState.lastPressedKey = localLastKey;
-        handleSynthRole(westConnected, eastConnected);
+        handleSynthRole(westConnected, eastConnected, octavePressed);
         xSemaphoreGive(sysState.mutex);
 
         // Only the receiver updates the local sound
