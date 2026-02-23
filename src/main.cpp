@@ -352,11 +352,19 @@ void scanKeysTask(void * pvParameters) {
         // Key scanning loop for Rows 0-2
         std::bitset<32> localInputs;
         for (int i = 0; i < 7; i++) {
-            if (i == 3 || i == 4) continue; // Skip rotation rows now on I2C  
             
             setRow(i);
             delayMicroseconds(3);
             std::bitset<4> cols = readCols();
+
+            if (i == 3) {
+                knobs[0].updateRotation(cols[0], cols[1]);
+                knobs[1].updateRotation(cols[2], cols[3]);
+            }
+            if (i == 4) {
+                knobs[2].updateRotation(cols[0], cols[1]);
+                knobs[3].updateRotation(cols[2], cols[3]);
+            }
 
             // Map rows 5 and 6 to knob switches
             // and updates east and west connections
@@ -378,11 +386,11 @@ void scanKeysTask(void * pvParameters) {
                 xQueueSend(msgOutQ, TX_Message.data(), 0); // Non-blocking send
             }
         #else
-        for (int i = 0; i < 4; i++) {
-            uint8_t bitA = localInputs[6 + (i * 2)];
-            uint8_t bitB = localInputs[6 + (i * 2) + 1];
-            knobs[i].updateRotation(bitA, bitB);
-        }
+        // for (int i = 0; i < 4; i++) {
+        //     uint8_t bitA = localInputs[6 + (i * 2)];
+        //     uint8_t bitB = localInputs[6 + (i * 2) + 1];
+        //     knobs[i].updateRotation(bitA, bitB);
+        // }
         
         for (int i = 0; i < 12; i++) {
             constructAndSendTXMessage(localInputs, prevInputs, i, TX_Message, localStepSize, localLastKey);
