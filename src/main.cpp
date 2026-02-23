@@ -192,15 +192,15 @@ void sampleISR() {
     analogWrite(OUTR_PIN, Vout + 128);
 }
 
-void knobISR() {
-  #ifdef PROFILING_MODE
-  xSemaphoreGive(knobSemaphore);
-  #else
-  BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-  xSemaphoreGiveFromISR(knobSemaphore, &xHigherPriorityTaskWoken);
-  portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
-  #endif
-}
+// void knobISR() {
+//   #ifdef PROFILING_MODE
+//   xSemaphoreGive(knobSemaphore);
+//   #else
+//   BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+//   xSemaphoreGiveFromISR(knobSemaphore, &xHigherPriorityTaskWoken);
+//   portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+//   #endif
+// }
 
 void CAN_RX_ISR (void) {
     std::array<uint8_t, 8> RX_Message_ISR;
@@ -295,44 +295,44 @@ void constructAndSendTXMessage(
 // ===================== Tasks ===================== //
 // ================================================= //
 
-void knobTask(void * pvParameters) {
-    uint8_t prevState = 0xFF;
-    int8_t lastDirection = 0;
+// void knobTask(void * pvParameters) {
+//     uint8_t prevState = 0xFF;
+//     int8_t lastDirection = 0;
 
-    #ifndef DISABLE_THREADS
-    while(1) {
-        // Block until the expander interrupt triggers
-        xSemaphoreTake(knobSemaphore, portMAX_DELAY);
+//     #ifndef DISABLE_THREADS
+//     while(1) {
+//         // Block until the expander interrupt triggers
+//         xSemaphoreTake(knobSemaphore, portMAX_DELAY);
     
-        // Read Expander via I2C until the pin is released high
-        do {
-    #endif
-            // WCET: Perform the I2C read sequence once. 
-            // Bypass the 'while(digitalRead(PA10)==LOW)' to prevent an infinite loop during profiling.
+//         // Read Expander via I2C until the pin is released high
+//         do {
+//     #endif
+//             // WCET: Perform the I2C read sequence once. 
+//             // Bypass the 'while(digitalRead(PA10)==LOW)' to prevent an infinite loop during profiling.
 
-            xSemaphoreTake(i2cMutex, portMAX_DELAY);
-            Wire.beginTransmission(EXPANDER_ADDR);
-            Wire.write(REG_INPUT);
-            Wire.endTransmission();
-            Wire.requestFrom(EXPANDER_ADDR, (uint8_t)1);
-            uint8_t currByte = Wire.read();
-            xSemaphoreGive(i2cMutex);
+//             xSemaphoreTake(i2cMutex, portMAX_DELAY);
+//             Wire.beginTransmission(EXPANDER_ADDR);
+//             Wire.write(REG_INPUT);
+//             Wire.endTransmission();
+//             Wire.requestFrom(EXPANDER_ADDR, (uint8_t)1);
+//             uint8_t currByte = Wire.read();
+//             xSemaphoreGive(i2cMutex);
 
-            for (int i = 0; i < 4; i++) {
-              uint8_t bitA = (currByte >> (i * 2)) & 0x01;
-              uint8_t bitB = (currByte >> (i * 2 + 1)) & 0x01;
-              knobs[i].updateRotation(bitA, bitB);
-            }
+//             for (int i = 0; i < 4; i++) {
+//               uint8_t bitA = (currByte >> (i * 2)) & 0x01;
+//               uint8_t bitB = (currByte >> (i * 2 + 1)) & 0x01;
+//               knobs[i].updateRotation(bitA, bitB);
+//             }
 
-            #ifdef PROFILE_KNOB
-            //Add delay to account for sticky pin
-            delay(20);
-            #endif
-    #ifndef DISABLE_THREADS 
-        } while (digitalRead(PA10) == LOW); // Loop if pin is stuck
-    }
-    #endif
-}
+//             #ifdef PROFILE_KNOB
+//             //Add delay to account for sticky pin
+//             delay(20);
+//             #endif
+//     #ifndef DISABLE_THREADS 
+//         } while (digitalRead(PA10) == LOW); // Loop if pin is stuck
+//     }
+//     #endif
+// }
 
 void scanKeysTask(void * pvParameters) {
     const TickType_t xFrequency = scanInterval/portTICK_PERIOD_MS;
@@ -351,20 +351,13 @@ void scanKeysTask(void * pvParameters) {
 
         // Key scanning loop for Rows 0-2
         std::bitset<32> localInputs;
-        for (int i = 0, offset = 0; i < 7; i++) { 
+        for (int i = 0; i < 7; i++) {
+            if (i == 3 || i == 4) continue; // Skip rotation rows now on I2C  
             
             setRow(i);
             delayMicroseconds(3);
             std::bitset<4> cols = readCols();
 
-            if (3 <= i  && i < 5) {
-                uint8_t knobIndex = (i == 3) ? 3 : 1;
-                knobs[knobIndex].setInitialState(sysState.inputs[0+offset], sysState.inputs[1+offset]);
-                knobs[knobIndex].setInitialState(sysState.inputs[2+offset], sysState.inputs[3+offset]);
-                knobs[knobIndex].updateRotation(cols[0],cols[1]);
-                knobs[knobIndex-1].updateRotation(cols[2],cols[3]);
-                continue;
-            }
             // Map rows 5 and 6 to knob switches
             // and updates east and west connections
             updateSwitchesAndConnections(cols, i, westConnected, eastConnected);
@@ -385,6 +378,12 @@ void scanKeysTask(void * pvParameters) {
                 xQueueSend(msgOutQ, TX_Message.data(), 0); // Non-blocking send
             }
         #else
+        for (int i = 0; i < 4; i++) {
+            uint8_t bitA = localInputs[6 + (i * 2)];
+            uint8_t bitB = localInputs[6 + (i * 2) + 1];
+            knobs[i].updateRotation(bitA, bitB);
+        }
+        
         for (int i = 0; i < 12; i++) {
             constructAndSendTXMessage(localInputs, prevInputs, i, TX_Message, localStepSize, localLastKey);
         }
@@ -543,18 +542,24 @@ void wireWrites(uint8_t enableAddress, uint8_t writeVal) {
 }
 
 void clearInterruptAndSync(uint8_t address, uint8_t writeVal) {
-    Wire.beginTransmission(address);
-    Wire.write(writeVal);            
-    Wire.endTransmission();
-    Wire.requestFrom(address, (uint8_t)1);
-    if (Wire.available()) {
-        uint8_t startByte = Wire.read();   
-        for (int i = 0; i < 4; i++) {
-          uint8_t bitA = (startByte >> (i * 2)) & 0x01;
-          uint8_t bitB = (startByte >> (i * 2 + 1)) & 0x01;
-          knobs[i].setInitialState(bitA, bitB); 
-      }    
-    }
+    // Wire.beginTransmission(address);
+    // Wire.write(writeVal);            
+    // Wire.endTransmission();
+    // Wire.requestFrom(address, (uint8_t)1);
+    // if (Wire.available()) {
+    //     uint8_t startByte = Wire.read();   
+    //     for (int i = 0; i < 4; i++) {
+    //       uint8_t bitA = (startByte >> (i * 2)) & 0x01;
+    //       uint8_t bitB = (startByte >> (i * 2 + 1)) & 0x01;
+    //       knobs[i].setInitialState(bitA, bitB); 
+    //     }    
+    // }
+
+    for (int i = 0; i < 4; i++) {
+        uint8_t bitA = 0b1;
+        uint8_t bitB = 0b1;
+        knobs[i].setInitialState(bitA, bitB); 
+    }  
 }
 
 void setPinDirections() {
@@ -574,7 +579,7 @@ void setPinDirections() {
     pinMode(JOYX_PIN, INPUT);
     pinMode(JOYY_PIN, INPUT);
 
-    pinMode(PA10, INPUT_PULLUP);
+    // pinMode(PA10, INPUT_PULLUP);
 }
 
 void initialiseDisplay() {
@@ -583,7 +588,8 @@ void initialiseDisplay() {
     setOutMuxBit(DRST_BIT, HIGH);  //Release display logic reset
     u8g2.begin();
     setOutMuxBit(DEN_BIT, HIGH);  //Enable display power supply
-    setOutMuxBit(KNOB_MODE, LOW);  //Do not read knobs through key matrix
+    setOutMuxBit(KNOB_MODE, HIGH);  //Do read knobs through key matrix
+    // setOutMuxBit(KNOB_MODE, LOW);  //Do not read knobs through key matrix
 }
 
 void initialiseCANBus() {
@@ -609,9 +615,9 @@ void initialisePCAL6408A() {
     knobSemaphore = xSemaphoreCreateBinary();
     Wire.begin();
     
-    wireWrites(REG_PULL_EN, 0xFF);  // Enable pullups
-    wireWrites(REG_LAT_EN, 0xFF);   // Enable latch
-    wireWrites(REG_INT_MASK, 0x00); // Interrupt mask
+    // wireWrites(REG_PULL_EN, 0xFF);  // Enable pullups
+    // wireWrites(REG_LAT_EN, 0xFF);   // Enable latch
+    // wireWrites(REG_INT_MASK, 0x00); // Interrupt mask
     
     for (int i = 0; i < 4; i++) {
         knobs[i].begin();
@@ -619,7 +625,7 @@ void initialisePCAL6408A() {
     clearInterruptAndSync(EXPANDER_ADDR, 0x00); 
     
     #ifndef DISABLE_ISRS
-    attachInterrupt(digitalPinToInterrupt(PA10), knobISR, FALLING); 
+    // attachInterrupt(digitalPinToInterrupt(PA10), knobISR, FALLING); 
     #endif
 }
 
