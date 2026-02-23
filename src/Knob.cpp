@@ -14,7 +14,6 @@ Knob::Knob(int8_t startVal, int8_t min, int8_t max) :
 }
 
 void Knob::begin() {
-    mutex = xSemaphoreCreateMutex();
 }
 
 void Knob::setInitialState(uint8_t currA, uint8_t currB) {
@@ -42,6 +41,21 @@ void Knob::updateRotation(uint8_t currA, uint8_t currB) {
             lastDirection = -1;
         }
         prevState = currState;
+
+        if (change != 0) {
+            int8_t current = __atomic_load_n(&atomicRotation, __ATOMIC_RELAXED);
+
+            int8_t newValue = current + change;
+
+            // Clamp BEFORE storing
+            if (newValue > upperLimit) newValue = upperLimit;
+            if (newValue < lowerLimit) newValue = lowerLimit;
+
+            __atomic_store_n(&atomicRotation, newValue, __ATOMIC_RELAXED);
+
+            // Keep rotation mirrored for display
+            rotation = newValue;
+        }
     }
 
     if (change != 0) {
@@ -71,15 +85,7 @@ bool Knob::isPressed() {
     return false;
 }
 
-// Reading for display
+// Reading 
 int8_t Knob::getValue() {
-    xSemaphoreTake(mutex, portMAX_DELAY);
-    int8_t val = rotation;
-    xSemaphoreGive(mutex);
-    return val;
-}
-
-// Reading for ISR
-int8_t Knob::getValueISR() {
     return __atomic_load_n(&atomicRotation, __ATOMIC_RELAXED);
 }

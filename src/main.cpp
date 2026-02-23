@@ -183,7 +183,7 @@ void setRow(uint8_t rowIdx){
 void sampleISR() {
     static uint32_t phaseAcc = 0;
     uint32_t localStepSize = __atomic_load_n(&currentStepSize, __ATOMIC_RELAXED);
-    int localVolumeShift = knobs[volumeIdx].getValueISR();
+    int localVolumeShift = knobs[volumeIdx].getValue();
     
     phaseAcc += localStepSize;
     int32_t Vout = (phaseAcc >> 24) - 128;
