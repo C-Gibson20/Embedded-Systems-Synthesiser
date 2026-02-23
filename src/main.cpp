@@ -8,8 +8,8 @@
 
 /* --- PROFILING SYSTEM --- */
 // #define PROFILING_MODE           // Disables scheduler and ISRs globally
-#define V1
-// #define V2
+// #define V1
+#define V2
 #ifdef PROFILING_MODE
   // #define DISABLE_THREADS
   // #define DISABLE_ISRS
@@ -328,11 +328,22 @@ void scanKeysTask(void * pvParameters) {
             delayMicroseconds(3);
             std::bitset<4> cols = readCols();
 
+            #ifdef V1
             if (3 <= i  && i < 5) {
                 uint8_t knobIndex = (i == 3) ? 3 : 1;
                 knobs[knobIndex].updateRotation(cols[0],cols[1]);
                 knobs[knobIndex-1].updateRotation(cols[2],cols[3]);
             }
+            #elifdef V2
+            if (i == 3) {
+                knobs[3].updateRotation(cols[0], cols[1]);
+                knobs[0].updateRotation(cols[2], cols[3]);
+            }
+            if (i == 4) {
+                knobs[2].updateRotation(cols[0], cols[1]);
+                knobs[1].updateRotation(cols[2], cols[3]);
+            }
+            #endif
             // Map rows 5 and 6 to knob switches
             // and updates east and west connections
             updateSwitchesAndConnections(cols, i, westConnected, eastConnected);
@@ -353,11 +364,6 @@ void scanKeysTask(void * pvParameters) {
                 xQueueSend(msgOutQ, TX_Message.data(), 0); // Non-blocking send
             }
         #else
-        // for (int i = 0; i < 4; i++) {
-        //     uint8_t bitA = localInputs[6 + (i * 2)];
-        //     uint8_t bitB = localInputs[6 + (i * 2) + 1];
-        //     knobs[i].updateRotation(bitA, bitB);
-        // }
         
         for (int i = 0; i < 12; i++) {
             constructAndSendTXMessage(localInputs, prevInputs, i, TX_Message, localStepSize, localLastKey);

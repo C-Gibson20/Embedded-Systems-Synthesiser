@@ -26,7 +26,6 @@ void Knob::updateRotation(uint8_t currA, uint8_t currB) {
     int8_t change = 0;
 
     if (currState != prevState) {
-        Serial.println("State changed: " + String(prevState, BIN) + " -> " + String(currState, BIN));
         // "Impossible" transition logic
         if ((currState ^ prevState) == 0b11) {
             change = lastDirection;
