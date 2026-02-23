@@ -351,13 +351,17 @@ void scanKeysTask(void * pvParameters) {
 
         // Key scanning loop for Rows 0-2
         std::bitset<32> localInputs;
-        for (int i = 0; i < 7; i++) {
-            if (i == 3 || i == 4) continue; // Skip rotation rows now on I2C  
+        for (int i = 0; i < 7; i++) { 
             
             setRow(i);
             delayMicroseconds(3);
             std::bitset<4> cols = readCols();
 
+            if (3 <= i  && i < 5) {
+                uint8_t knobIndex = (i == 3) ? 3 : 1;
+                knobs[knobIndex].updateRotation(cols[0],cols[1]);
+                knobs[knobIndex-1].updateRotation(cols[2],cols[3]);
+            }
             // Map rows 5 and 6 to knob switches
             // and updates east and west connections
             updateSwitchesAndConnections(cols, i, westConnected, eastConnected);
