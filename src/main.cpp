@@ -5,11 +5,12 @@
 #include <Wire.h>
 #include "Knob.h"
 #include <ES_CAN.h>
+#include <bits/stdc++.h>
 
 /* --- PROFILING SYSTEM --- */
 // #define PROFILING_MODE           // Disables scheduler and ISRs globally
-// #define V1
-#define V2
+#define V1
+// #define V2
 #ifdef PROFILING_MODE
   // #define DISABLE_THREADS
   // #define DISABLE_ISRS
@@ -71,6 +72,8 @@
 enum SynthRole { SENDER, RECEIVER };
 
 volatile uint32_t currentStepSize = 0;
+volatile uint32_t currentStepSizes[12] = {0};
+uint32_t phaseAccumulators[12] = {0};
 
 struct {
     SynthRole role = RECEIVER;
@@ -182,14 +185,26 @@ void setRow(uint8_t rowIdx){
 // ================================================= //
 
 void sampleISR() {
-    static uint32_t phaseAcc = 0;
-    uint32_t localStepSize = __atomic_load_n(&currentStepSize, __ATOMIC_RELAXED);
+    int32_t mixedVout = 0;
+    uint8_t activeNotes = 0;
     int localVolumeShift = knobs[volumeIdx].getValue();
-    
-    phaseAcc += localStepSize;
-    int32_t Vout = (phaseAcc >> 24) - 128;
-    Vout = Vout >> (8 - localVolumeShift); 
-    analogWrite(OUTR_PIN, Vout + 128);
+
+    for (int i = 0; i < 12; i++) {
+        uint32_t step = __atomic_load_n(&currentStepSizes[i], __ATOMIC_RELAXED);
+        if (step > 0) {
+            phaseAccumulators[i] += step;
+            int32_t noteVout = (int32_t)(phaseAccumulators[i] >> 24) - 128;
+            mixedVout += noteVout;
+            activeNotes++;
+        }
+    }
+
+    if (activeNotes > 0) {
+        mixedVout = mixedVout / activeNotes;
+    }
+
+    mixedVout = mixedVout >> (8 - localVolumeShift);
+    analogWrite(OUTR_PIN, mixedVout + 128);
 }
 
 // void knobISR() {
@@ -278,7 +293,7 @@ void constructAndSendTXMessage(
   std::bitset<32> prevInputs, 
   uint8_t keyIdx, 
   std::array<uint8_t, 8> &TX_Message,
-  uint32_t &localStepSize,
+  uint32_t localStepSizes [12],
   int &localLastKey
 ) {
     bool isPressed = (localInputs[keyIdx] == 0);
@@ -286,10 +301,10 @@ void constructAndSendTXMessage(
     int octave = knobs[octaveIdx].getValue();
 
     if (isPressed) {
-        localStepSize = stepSizes[keyIdx];
+        localStepSizes[keyIdx] = stepSizes[keyIdx];
         int8_t shift = octave - 4;
-        if (shift > 0) localStepSize <<= shift; 
-        else if (shift < 0) localStepSize >>= abs(shift);
+        if (shift > 0) localStepSizes[keyIdx] <<= shift; 
+        else if (shift < 0) localStepSizes[keyIdx] >>= abs(shift);
         localLastKey = keyIdx;
     }
 
@@ -311,7 +326,7 @@ void scanKeysTask(void * pvParameters) {
 
     static std::bitset<32> prevInputs;
     static std::array<uint8_t, 8> TX_Message = {0};
-    static uint32_t lastStepSize = 0;
+    static uint32_t lastStepSizesSum = 0;
     static bool westConnected = false;
     static bool eastConnected = false;
 
@@ -352,7 +367,7 @@ void scanKeysTask(void * pvParameters) {
             mapColumnsToSet(localInputs, cols, i);
         }
 
-        uint32_t localStepSize = 0;
+        uint32_t localStepSizes[12] = {0};
         int localLastKey = -1;
 
         #ifdef PROFILE_SCANKEYS
@@ -364,11 +379,11 @@ void scanKeysTask(void * pvParameters) {
                 xQueueSend(msgOutQ, TX_Message.data(), 0); // Non-blocking send
             }
         #else
-        
         for (int i = 0; i < 12; i++) {
-            constructAndSendTXMessage(localInputs, prevInputs, i, TX_Message, localStepSize, localLastKey);
+            constructAndSendTXMessage(localInputs, prevInputs, i, TX_Message, localStepSizes, localLastKey);
         }
         #endif
+        uint64_t localStepSizesSum = std::reduce(localStepSizes,localStepSizes+12,0);
         prevInputs = localInputs;
 
         bool octavePressed = knobs[octaveIdx].isPressed();
@@ -379,9 +394,11 @@ void scanKeysTask(void * pvParameters) {
         xSemaphoreGive(sysState.mutex);
 
         // Only the receiver updates the local sound
-        if ((sysState.role == RECEIVER) && (localStepSize != lastStepSize)) {
-            __atomic_store_n(&currentStepSize, localStepSize, __ATOMIC_RELAXED);
-            lastStepSize = localStepSize;
+        if ((sysState.role == RECEIVER) && (localStepSizesSum != lastStepSizesSum)) {
+            for (int i = 0; i < 12; i++) {
+                __atomic_store_n(&currentStepSizes[i], localStepSizes[i], __ATOMIC_RELAXED);
+            }
+            lastStepSizesSum = localStepSizesSum;
         } 
     #ifndef DISABLE_THREADS
     }
