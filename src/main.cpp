@@ -169,7 +169,7 @@ void setRow(uint8_t rowIdx){
     digitalWrite(RA2_PIN, rowIdx & 0x04);
 
     // Latch for KNOB_MODE
-    digitalWrite(OUT_PIN, (rowIdx == 2) ? LOW : HIGH);
+    // digitalWrite(OUT_PIN, (rowIdx == 2) ? LOW : HIGH);
 
     // Set Row Select Enable High
     digitalWrite(REN_PIN, HIGH);
