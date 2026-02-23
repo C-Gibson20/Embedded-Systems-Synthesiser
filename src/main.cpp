@@ -597,7 +597,7 @@ void initialiseDisplay() {
 }
 
 void initialiseCANBus() {
-    CAN_Init(true);
+    CAN_Init(false);
     setCANFilter(0x123,0x7ff);
 
     #ifndef DISABLE_ISRS
