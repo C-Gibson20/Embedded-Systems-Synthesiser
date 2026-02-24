@@ -3,9 +3,10 @@
 #include <bitset>
 #include <STM32FreeRTOS.h>
 #include <Wire.h>
-#include "Knob.h"
 #include <ES_CAN.h>
 #include <bits/stdc++.h>
+#include "Knob.h"
+#include "sine_lut.h"
 
 /* --- PROFILING SYSTEM --- */
 // #define PROFILING_MODE           // Disables scheduler and ISRs globally
@@ -46,7 +47,7 @@
   const double pow2_32 = 4294967296.0;
 
   const char* noteNames[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
-
+  const char* waveNames[] = {"SQ","SA","TR","SI","N/A","N/A","N/A","N/A","N/A","N/A","N/A","N/A"};
   constexpr float f_notes[] = {
     261.63f, 277.18f, 293.66f, 311.13f, // C, C#, D, D#
     329.63f, 349.23f, 369.99f, 392.00f, // E, F, F#, G
@@ -70,7 +71,7 @@
 
 //Shared state
 enum SynthRole { SENDER, RECEIVER };
-
+enum SynthWaveform {SQUARE, SAW, TRIANGLE, SINE};
 volatile uint32_t currentStepSize = 0;
 volatile uint32_t currentStepSizes[12] = {0};
 uint32_t phaseAccumulators[12] = {0};
@@ -95,6 +96,7 @@ Knob knobs[4] = {
 };
 const uint8_t volumeIdx = 3;
 const uint8_t octaveIdx = 2;
+const uint8_t waveIdx = 1;
 
 //CAN Bus Communication
 QueueHandle_t msgInQ;
@@ -189,21 +191,42 @@ void sampleISR() {
     int32_t mixedVout = 0;
     uint8_t activeNotes = 0;
     int localVolumeShift = knobs[volumeIdx].getValue();
-
+    SynthWaveform localWaveform = (SynthWaveform)knobs[waveIdx].getValue();
     for (int i = 0; i < 12; i++) {
         uint32_t step = __atomic_load_n(&currentStepSizes[i], __ATOMIC_RELAXED);
         if (step > 0) {
             phaseAccumulators[i] += step;
-            int32_t noteVout = (int32_t)(phaseAccumulators[i] >> 24) - 128;
+            uint8_t index = phaseAccumulators[i] >> 24;
+            uint32_t uncenteredValue = 0;
+            switch (localWaveform)
+            {
+            case SQUARE:
+                uncenteredValue = (index < 128) ? 255 : 0;
+                break;
+            case SAW:
+                uncenteredValue = index;
+                break;
+            case TRIANGLE:
+                if (index < 128) {
+                    uncenteredValue = index << 1; // 0 to 254
+                } else {
+                    uncenteredValue = 511 - (index << 1); // 255 down to 1
+                }
+                break;
+            case SINE:
+                uncenteredValue = sineTable[index];
+                break;
+            default:
+                break;
+            }
+            int32_t noteVout = (int32_t)(uncenteredValue) - 128;
             mixedVout += noteVout;
             activeNotes++;
         }
     }
-
     if (activeNotes > 0) {
         mixedVout = mixedVout / activeNotes;
     }
-
     mixedVout = mixedVout >> (8 - localVolumeShift);
     analogWrite(OUTR_PIN, mixedVout + 128);
 }
@@ -243,7 +266,7 @@ void CAN_TX_ISR (void) {
 // ================== Task Helpers ================= //
 // ================================================= //
 
-void handleSynthRole(bool westConnected, bool eastConnected, bool octavePressed) {
+void handleSynthRole(bool westConnected, bool eastConnected, bool octavePressed, bool volumePressed) {
     if (westConnected || eastConnected) {
         if (!westConnected && eastConnected) {
           sysState.role = SENDER;
@@ -255,8 +278,15 @@ void handleSynthRole(bool westConnected, bool eastConnected, bool octavePressed)
         sysState.role = (sysState.role == RECEIVER) ? SENDER : RECEIVER;
     }
 
+    if (volumePressed) {
+        // sysState.waveform = (sysState.waveform == SINE) ? TRIANGLE : SINE;
+    }
+
     if (sysState.role == SENDER) {
-        __atomic_store_n(&currentStepSize, 0, __ATOMIC_RELAXED); // Silent Sender
+        for (int i = 0; i < 12; i++) {
+                __atomic_store_n(&currentStepSizes[i], 0, __ATOMIC_RELAXED);
+        }
+        // __atomic_store_n(&currentStepSize, 0, __ATOMIC_RELAXED); // Silent Sender
     }
 }
 
@@ -391,11 +421,12 @@ void scanKeysTask(void * pvParameters) {
         prevInputs = localInputs;
 
         bool octavePressed = knobs[octaveIdx].isPressed();
+        bool volumePressed = knobs[volumeIdx].isPressed();
         xSemaphoreTake(sysState.mutex, portMAX_DELAY);
         sysState.inputs = localInputs;
         memcpy(sysState.lastPressedKeys,localLastKeys,12);
         sysState.lastPressedKeyindex = localLastKeyIndex;
-        handleSynthRole(westConnected, eastConnected, octavePressed);
+        handleSynthRole(westConnected, eastConnected, octavePressed, volumePressed);
         xSemaphoreGive(sysState.mutex);
 
         // Only the receiver updates the local sound
@@ -504,11 +535,13 @@ void displayUpdateTask(void * pvParameters) {
         u8g2.print(noteNames[sysState.lastPressedKeys[i]]);
       }
       u8g2.setCursor(2, 20);
-      u8g2.print("K: "); 
-      for (int i = 0; i < 2; i++) {
-          u8g2.print(knobs[i].getValue());
-          u8g2.print(", "); 
-      }
+      u8g2.print("Wav: ");
+      u8g2.print(waveNames[knobs[waveIdx].getValue()]);
+    //   u8g2.print("K: "); 
+    //   for (int i = 0; i < 2; i++) {
+    //       u8g2.print(knobs[i].getValue());
+    //       u8g2.print(", "); 
+    //   }
       u8g2.print("Oct: "); 
       u8g2.print(knobs[octaveIdx].getValue());
       u8g2.print(", Vol: "); 
