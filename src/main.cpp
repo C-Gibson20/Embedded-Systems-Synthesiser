@@ -267,7 +267,7 @@ void CAN_TX_ISR (void) {
 // ================== Task Helpers ================= //
 // ================================================= //
 
-void handleSynthRole(bool westConnected, bool eastConnected, bool octavePressed, bool volumePressed) {
+void handleSynthRole(bool westConnected, bool eastConnected, bool octavePressed, bool volumePressed, bool wavePressed) {
     if (westConnected || eastConnected) {
         if (!westConnected && eastConnected) {
           sysState.role = SENDER;
@@ -280,15 +280,13 @@ void handleSynthRole(bool westConnected, bool eastConnected, bool octavePressed,
     }
 
     if (volumePressed) {
-        if (sysState.hold) {
-            sysState.hold = false;
-            sysState.heldKeys.reset();
-        }
-        else {
-            sysState.hold = true;
-            sysState.heldKeys = sysState.lastPressedKeys;
-        }
-    
+        sysState.hold = true;
+        sysState.heldKeys |= sysState.lastPressedKeys;
+    }
+
+    if (wavePressed) {
+        sysState.hold = false;
+        sysState.heldKeys.reset();
     }
 
     if (sysState.role == SENDER) {
@@ -352,7 +350,7 @@ void constructAndSendTXMessage(
         TX_Message[0] = isPressed ? 'P' : 'R';
         TX_Message[1] = octave;
         TX_Message[2] = keyIdx;
-        xQueueSend(msgOutQ, TX_Message.data(), portMAX_DELAY);
+        xQueueSend(msgOutQ, TX_Message.data(), 0); // If you spam keys this causes deadlocks if set to portMAX_DELAY
     }
 }
 
@@ -427,12 +425,13 @@ void scanKeysTask(void * pvParameters) {
         uint64_t localStepSizesSum = std::reduce(localStepSizes,localStepSizes+12,0);
         prevInputs = localInputs;
 
+        bool wavePressed = knobs[waveIdx].isPressed();
         bool octavePressed = knobs[octaveIdx].isPressed();
         bool volumePressed = knobs[volumeIdx].isPressed();
         xSemaphoreTake(sysState.mutex, portMAX_DELAY);
         sysState.inputs = localInputs;
         sysState.lastPressedKeys = localLastKeys;
-        handleSynthRole(westConnected, eastConnected, octavePressed, volumePressed);
+        handleSynthRole(westConnected, eastConnected, octavePressed, volumePressed, wavePressed);
         xSemaphoreGive(sysState.mutex);
 
         // Only the receiver updates the local sound
@@ -538,20 +537,13 @@ void displayUpdateTask(void * pvParameters) {
       #else
       // Print the state of the first 12 keys as a Hex value
     //   u8g2.print(localInputs.to_ulong(), HEX);
-      u8g2.print("  Notes: ");
+      u8g2.print("Notes: ");
       std::bitset<12> displayNotes = sysState.lastPressedKeys | sysState.heldKeys;
       for (int i = 0; i < 12; i ++){
         if (displayNotes[i])
             u8g2.print(noteNames[i]);
       }
       u8g2.setCursor(2, 20);
-      u8g2.print("Wav: ");
-      u8g2.print(waveNames[knobs[waveIdx].getValue()]);
-    //   u8g2.print("K: "); 
-    //   for (int i = 0; i < 2; i++) {
-    //       u8g2.print(knobs[i].getValue());
-    //       u8g2.print(", "); 
-    //   }
       u8g2.print("Oct: "); 
       u8g2.print(knobs[octaveIdx].getValue());
       u8g2.print(", Vol: "); 
@@ -560,8 +552,9 @@ void displayUpdateTask(void * pvParameters) {
       u8g2.print((char) localMsg[0]);
       u8g2.print(localMsg[1]);
       u8g2.print(localMsg[2]);
-      u8g2.setCursor(50,30);
-      u8g2.print("Role: ");
+      u8g2.print(" Wav: ");
+      u8g2.print(waveNames[knobs[waveIdx].getValue()]);
+      u8g2.print(", Role: ");
       u8g2.print((role == SENDER) ? "S": "R");
       #endif
       
@@ -668,7 +661,7 @@ void initialiseThreads() {
     TaskHandle_t decodeHandle = NULL;
     TaskHandle_t displayUpdateHandle = NULL;
     TaskHandle_t canTxHandle = NULL;
-    xTaskCreate(scanKeysTask, "scanKeys", 128, NULL, 3, &scanKeysHandle);
+    xTaskCreate(scanKeysTask, "scanKeys", 128, NULL, 4, &scanKeysHandle);
     xTaskCreate(displayUpdateTask, "displayUpdate", 256, NULL, 1, &displayUpdateHandle);
     xTaskCreate(decodeTask, "decode", 128, NULL, 2, &decodeHandle);
     xTaskCreate(CAN_TX_Task, "canTX", 128, NULL, 2, &canTxHandle);
