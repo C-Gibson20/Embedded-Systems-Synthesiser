@@ -539,14 +539,9 @@ void displayUpdateTask(void * pvParameters) {
       // Print the state of the first 12 keys as a Hex value
     //   u8g2.print(localInputs.to_ulong(), HEX);
       u8g2.print("  Notes: ");
-      if (sysState.hold) {
-        for (int i = 0; i < 12; i++) {
-            if (sysState.heldKeys[i])
-                u8g2.print(noteNames[i]);
-        }
-      }
+      std::bitset<12> displayNotes = sysState.lastPressedKeys | sysState.heldKeys;
       for (int i = 0; i < 12; i ++){
-        if (sysState.lastPressedKeys[i])
+        if (displayNotes[i])
             u8g2.print(noteNames[i]);
       }
       u8g2.setCursor(2, 20);
