@@ -1,3 +1,6 @@
+#ifndef SINE_LUT_H
+#define SINE_LUT_H
+
 #include <stdint.h>
 
 // Pre-calculated Sine table for 512 steps
@@ -47,3 +50,4 @@ const uint8_t sineTable[512] = {
     115, 117, 118, 120, 121, 123, 124, 126,
 };
 
+#endif // SINE_LUT_H

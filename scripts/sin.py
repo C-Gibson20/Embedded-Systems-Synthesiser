@@ -1,6 +1,6 @@
 import math
 
-def write_sine_lut_to_file(filename="../include/sine_lut.h", size=512):
+def write_sine_lut_to_file(filename="include/sine_lut.h", size=512):
     lut = []
     for i in range(size):
         # Calculate angle (0 to 2pi)

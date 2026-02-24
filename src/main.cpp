@@ -47,7 +47,7 @@
   const double pow2_32 = 4294967296.0;
 
   const char* noteNames[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
-  const char* waveNames[] = {"SQ","SA","TR","SI","N/A","N/A","N/A","N/A","N/A","N/A","N/A","N/A"};
+  const char* waveNames[] = {"SQ","SW","TR","SI","SS","SF"};
   constexpr float f_notes[] = {
     261.63f, 277.18f, 293.66f, 311.13f, // C, C#, D, D#
     329.63f, 349.23f, 369.99f, 392.00f, // E, F, F#, G
@@ -71,7 +71,7 @@
 
 //Shared state
 enum SynthRole { SENDER, RECEIVER };
-enum SynthWaveform {SQUARE, SAW, TRIANGLE, SINE};
+enum SynthWaveform {SQUARE, SAW, TRIANGLE, SINE, SUPERSAW, SINEFOLD};
 volatile uint32_t currentStepSize = 0;
 volatile uint32_t currentStepSizes[12] = {0};
 uint32_t phaseAccumulators[12] = {0};
@@ -90,14 +90,15 @@ struct {
 SemaphoreHandle_t CAN_TX_Semaphore;
 
 Knob knobs[4] = {
-    Knob(0, 0, 8),
-    Knob(0, 0, 8),
+    Knob(0, -128, 127),
+    Knob(0, 0, 5),
     Knob(4, 0, 8),
     Knob(2, 0, 8)  
 };
 const uint8_t volumeIdx = 3;
 const uint8_t octaveIdx = 2;
 const uint8_t waveIdx = 1;
+const uint8_t pitchIdx = 0;
 
 //CAN Bus Communication
 QueueHandle_t msgInQ;
@@ -192,11 +193,14 @@ void sampleISR() {
     int32_t mixedVout = 0;
     uint8_t activeNotes = 0;
     int localVolumeShift = knobs[volumeIdx].getValue();
+    int pitchMod = knobs[pitchIdx].getValue();
     SynthWaveform localWaveform = (SynthWaveform)knobs[waveIdx].getValue();
     for (int i = 0; i < 12; i++) {
         uint32_t step = __atomic_load_n(&currentStepSizes[i], __ATOMIC_RELAXED);
+
         if (step > 0) {
-            phaseAccumulators[i] += step;
+            int32_t offset = (step * (pitchMod >> 2)) >> 6;
+            phaseAccumulators[i] += (step + offset);
             uint8_t index = phaseAccumulators[i] >> 24;
             uint32_t uncenteredValue = 0;
             switch (localWaveform)
@@ -217,6 +221,21 @@ void sampleISR() {
             case SINE:
                 uncenteredValue = sineTable[index];
                 break;
+            case SUPERSAW: {
+                // Phase-shifted version mixed with the original
+                // This creates a "chorus" or "thickening" effect
+                uint8_t saw1 = index;
+                uint8_t saw2 = (index + (index >> 2)) & 0xFF; 
+                uncenteredValue = (saw1 + saw2) >> 1;
+                break;
+            }
+            case SINEFOLD: {
+                int16_t val = (sineTable[index] - 128) * 2; // Double the amplitude
+                if (val > 127) val = 255 - val;             // Fold the top
+                if (val < -128) val = -255 - val;           // Fold the bottom
+                uncenteredValue = val + 128;
+                break;
+            }
             default:
                 break;
             }
@@ -544,7 +563,9 @@ void displayUpdateTask(void * pvParameters) {
             u8g2.print(noteNames[i]);
       }
       u8g2.setCursor(2, 20);
-      u8g2.print("Oct: "); 
+      u8g2.print("Wav: ");
+      u8g2.print(waveNames[knobs[waveIdx].getValue()]);
+      u8g2.print(", Oct: "); 
       u8g2.print(knobs[octaveIdx].getValue());
       u8g2.print(", Vol: "); 
       u8g2.print(knobs[volumeIdx].getValue());
@@ -552,8 +573,8 @@ void displayUpdateTask(void * pvParameters) {
       u8g2.print((char) localMsg[0]);
       u8g2.print(localMsg[1]);
       u8g2.print(localMsg[2]);
-      u8g2.print(" Wav: ");
-      u8g2.print(waveNames[knobs[waveIdx].getValue()]);
+      u8g2.print(", Pch: "); 
+      u8g2.print(knobs[pitchIdx].getValue());
       u8g2.print(", Role: ");
       u8g2.print((role == SENDER) ? "S": "R");
       #endif
