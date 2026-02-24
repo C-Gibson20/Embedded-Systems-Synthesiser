@@ -79,8 +79,9 @@ uint32_t phaseAccumulators[12] = {0};
 struct {
     SynthRole role = RECEIVER;
     std::bitset<32> inputs;
-    int lastPressedKeys [12] = {-1};
-    int lastPressedKeyindex = 0;
+    std::bitset<12> lastPressedKeys;
+    bool hold = false;
+    std::bitset<12> heldKeys;
     std::array<uint8_t, 8> RX_Message = {0};
     SemaphoreHandle_t mutex;
 } sysState;
@@ -279,7 +280,15 @@ void handleSynthRole(bool westConnected, bool eastConnected, bool octavePressed,
     }
 
     if (volumePressed) {
-        // sysState.waveform = (sysState.waveform == SINE) ? TRIANGLE : SINE;
+        if (sysState.hold) {
+            sysState.hold = false;
+            sysState.heldKeys.reset();
+        }
+        else {
+            sysState.hold = true;
+            sysState.heldKeys = sysState.lastPressedKeys;
+        }
+    
     }
 
     if (sysState.role == SENDER) {
@@ -325,8 +334,7 @@ void constructAndSendTXMessage(
   uint8_t keyIdx, 
   std::array<uint8_t, 8> &TX_Message,
   uint32_t localStepSizes [12],
-  uint8_t &localLastKeyIndex,
-  int localLastKeys [12]
+  std::bitset<12> &localLastKeys
 ) {
     bool isPressed = (localInputs[keyIdx] == 0);
     bool wasPressed = (prevInputs[keyIdx] == 0);
@@ -337,8 +345,7 @@ void constructAndSendTXMessage(
         int8_t shift = octave - 4;
         if (shift > 0) localStepSizes[keyIdx] <<= shift; 
         else if (shift < 0) localStepSizes[keyIdx] >>= abs(shift);
-        localLastKeys[localLastKeyIndex] = keyIdx;
-        localLastKeyIndex ++;
+        localLastKeys[keyIdx] = 1;
     }
 
     if (isPressed != wasPressed) {
@@ -360,6 +367,7 @@ void scanKeysTask(void * pvParameters) {
     static std::bitset<32> prevInputs;
     static std::array<uint8_t, 8> TX_Message = {0};
     static uint32_t lastStepSizesSum = 0;
+    static bool lastHoldValue = false;
     static bool westConnected = false;
     static bool eastConnected = false;
 
@@ -401,8 +409,7 @@ void scanKeysTask(void * pvParameters) {
         }
 
         uint32_t localStepSizes[12] = {0};
-        int localLastKeys [12] = {-1};
-        uint8_t localLastKeyIndex = 0;
+        std::bitset<12> localLastKeys;
 
         #ifdef PROFILE_SCANKEYS
             // WCET: Force 12 messages to be sent every time regardless of actual state
@@ -414,7 +421,7 @@ void scanKeysTask(void * pvParameters) {
             }
         #else
         for (int i = 0; i < 12; i++) {
-            constructAndSendTXMessage(localInputs, prevInputs, i, TX_Message, localStepSizes, localLastKeyIndex, localLastKeys);
+            constructAndSendTXMessage(localInputs, prevInputs, i, TX_Message, localStepSizes, localLastKeys);
         }
         #endif
         uint64_t localStepSizesSum = std::reduce(localStepSizes,localStepSizes+12,0);
@@ -424,17 +431,18 @@ void scanKeysTask(void * pvParameters) {
         bool volumePressed = knobs[volumeIdx].isPressed();
         xSemaphoreTake(sysState.mutex, portMAX_DELAY);
         sysState.inputs = localInputs;
-        memcpy(sysState.lastPressedKeys,localLastKeys,12);
-        sysState.lastPressedKeyindex = localLastKeyIndex;
+        sysState.lastPressedKeys = localLastKeys;
         handleSynthRole(westConnected, eastConnected, octavePressed, volumePressed);
         xSemaphoreGive(sysState.mutex);
 
         // Only the receiver updates the local sound
-        if ((sysState.role == RECEIVER) && (localStepSizesSum != lastStepSizesSum)) {
+        if ((sysState.role == RECEIVER) && (localStepSizesSum != lastStepSizesSum || lastHoldValue != sysState.hold)) {
             for (int i = 0; i < 12; i++) {
-                __atomic_store_n(&currentStepSizes[i], localStepSizes[i], __ATOMIC_RELAXED);
+                if ( !(sysState.hold && sysState.heldKeys[i]) )
+                    __atomic_store_n(&currentStepSizes[i], localStepSizes[i], __ATOMIC_RELAXED);
             }
             lastStepSizesSum = localStepSizesSum;
+            lastHoldValue = sysState.hold;
         } 
     #ifndef DISABLE_THREADS
     }
@@ -531,8 +539,15 @@ void displayUpdateTask(void * pvParameters) {
       // Print the state of the first 12 keys as a Hex value
     //   u8g2.print(localInputs.to_ulong(), HEX);
       u8g2.print("  Notes: ");
-      for (int i = 0; i < sysState.lastPressedKeyindex; i ++){
-        u8g2.print(noteNames[sysState.lastPressedKeys[i]]);
+      if (sysState.hold) {
+        for (int i = 0; i < 12; i++) {
+            if (sysState.heldKeys[i])
+                u8g2.print(noteNames[i]);
+        }
+      }
+      for (int i = 0; i < 12; i ++){
+        if (sysState.lastPressedKeys[i])
+            u8g2.print(noteNames[i]);
       }
       u8g2.setCursor(2, 20);
       u8g2.print("Wav: ");
