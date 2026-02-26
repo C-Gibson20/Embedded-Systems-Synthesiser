@@ -70,7 +70,7 @@
   };
 
 //Shared state
-enum SynthRole { SENDER, RECEIVER };
+enum SynthRole { SENDER, RECEIVER, SINGLE };
 enum SynthWaveform {SQUARE, SAW, TRIANGLE, SINE, SUPERSAW, SINEFOLD};
 // volatile uint32_t currentStepSize = 0;
 // volatile uint32_t currentStepSizes[12] = {0};
@@ -79,7 +79,7 @@ volatile uint32_t remoteStepSizesShared[12] = {0};
 uint32_t phaseAccumulators[12] = {0};
 
 struct {
-    SynthRole role = RECEIVER;
+    SynthRole role = SINGLE;
     std::bitset<32> inputs;
     std::bitset<12> lastPressedKeys;
     bool hold = false;
@@ -280,18 +280,42 @@ void CAN_TX_ISR (void) {
 // ================== Task Helpers ================= //
 // ================================================= //
 
-void handleSynthRole(bool westConnected, bool eastConnected, bool octavePressed, bool volumePressed, bool wavePressed) {
-    if (westConnected || eastConnected) {
-        if (!westConnected && eastConnected) {
-          sysState.role = SENDER;
-        } else {
-          sysState.role = RECEIVER;
-        }
+void handleSynthRole(bool westConnected, bool eastConnected, bool octavePressed) {
+    static SynthRole lastRole = SINGLE;
+    static bool overwrittenAutoConfig = false;
+
+    // Disconnected defaults to single mode and resets auto-config override
+    if (!westConnected && !eastConnected) {
+        sysState.role = SINGLE;
+        overwrittenAutoConfig = false;
     }
+    
+    // Manual override if connected to at least one other device
     else if (octavePressed) {
-        sysState.role = (sysState.role == RECEIVER) ? SENDER : RECEIVER;
+        overwrittenAutoConfig = true;
+        sysState.role = (sysState.role == SENDER) ? RECEIVER : SENDER;
     }
 
+    // If auto-configuration has not been overridden, determine role based on connections
+    else if (!overwrittenAutoConfig && !westConnected && eastConnected) {
+        sysState.role = SENDER;
+    } else if (!overwrittenAutoConfig && westConnected) {
+        sysState.role = RECEIVER;
+    }
+    
+    if ((lastRole != sysState.role) && (sysState.role != RECEIVER)) {
+        for (int i = 0; i < 12; i++) {
+            __atomic_store_n(&remoteStepSizesShared[i], 0, __ATOMIC_RELAXED);
+
+            if (sysState.role == SENDER) {
+                __atomic_store_n(&localStepSizesShared[i], 0, __ATOMIC_RELAXED);
+            }
+        }
+    }
+    lastRole = sysState.role;
+}
+
+void handleHeldKeys(bool volumePressed, bool wavePressed) {
     if (volumePressed) {
         sysState.hold = true;
         sysState.heldKeys |= sysState.lastPressedKeys;
@@ -300,13 +324,6 @@ void handleSynthRole(bool westConnected, bool eastConnected, bool octavePressed,
     if (wavePressed) {
         sysState.hold = false;
         sysState.heldKeys.reset();
-    }
-
-    if (sysState.role == SENDER) {
-        for (int i = 0; i < 12; i++) {
-            __atomic_store_n(&remoteStepSizesShared[i], 0, __ATOMIC_RELAXED);
-            __atomic_store_n(&localStepSizesShared[i], 0, __ATOMIC_RELAXED);
-        }
     }
 }
 
@@ -445,18 +462,17 @@ void scanKeysTask(void * pvParameters) {
         uint64_t localStepSizesSum = std::reduce(localStepSizes,localStepSizes+12,0);
         prevInputs = localInputs;
 
-        bool wavePressed = knobs[waveIdx].isPressed();
         bool octavePressed = knobs[octaveIdx].isPressed();
-        bool volumePressed = knobs[volumeIdx].isPressed();
+        handleHeldKeys(knobs[volumeIdx].isPressed(), knobs[waveIdx].isPressed());
 
         xSemaphoreTake(sysState.mutex, portMAX_DELAY);
         sysState.inputs = localInputs;
         sysState.lastPressedKeys = localLastKeys;
-        handleSynthRole(westConnected, eastConnected, octavePressed, volumePressed, wavePressed);
+        handleSynthRole(westConnected, eastConnected, octavePressed);
         xSemaphoreGive(sysState.mutex);
 
-        // Only the receiver updates the local sound
-        if ((sysState.role == RECEIVER) && (localStepSizesSum != lastStepSizesSum || lastHoldValue != sysState.hold)) {
+        // Only the single and receiver updates the local sound
+        if (((sysState.role == RECEIVER) || (sysState.role == SINGLE)) && (localStepSizesSum != lastStepSizesSum || lastHoldValue != sysState.hold)) {
             for (int i = 0; i < 12; i++) {
                 if ( !(sysState.hold && sysState.heldKeys[i]) )
                     __atomic_store_n(&localStepSizesShared[i], localStepSizes[i], __ATOMIC_RELAXED);
@@ -583,8 +599,10 @@ void displayUpdateTask(void * pvParameters) {
       u8g2.print(localMsg[2]);
       u8g2.print(", Pch: "); 
       u8g2.print(knobs[pitchIdx].getValue());
-      u8g2.print(", Role: ");
-      u8g2.print((role == SENDER) ? "S": "R");
+      if (role != SINGLE) {
+        u8g2.print(", Role: ");
+        u8g2.print((role == SENDER) ? "S": "R");
+    }
       #endif
       
       u8g2.sendBuffer();
