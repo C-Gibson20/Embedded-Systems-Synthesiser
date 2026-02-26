@@ -73,17 +73,25 @@
 enum SynthRole { SENDER, RECEIVER, SINGLE };
 enum SynthWaveform {SQUARE, SAW, TRIANGLE, SINE, SUPERSAW, SINEFOLD};
 enum OctaveControlMode {OCTAVE_LOCAL, OCTAVE_OFFSET};
-// volatile uint32_t localStepSizesShared[12] = {0};
-// volatile uint32_t remoteStepSizesShared[12] = {0};
-// uint32_t phaseAccumulators[12] = {0};
+
+struct DisplayState {
+    uint8_t waveform;
+    uint8_t volume;
+    int8_t pitch;
+    int8_t octave;
+    SynthRole role;
+    OctaveControlMode octaveMode;
+    uint16_t activeNotes;
+};
 
 struct {
     SynthRole role = SINGLE;
     std::bitset<32> inputs;
     bool hold = false;
     std::array<uint8_t, 8> RX_Message = {0};
+    std::array<uint8_t, 8> TX_Message = {0};
     OctaveControlMode octaveMode = OCTAVE_LOCAL;
-
+    DisplayState displayState;
     SemaphoreHandle_t mutex;
 } sysState;
 
@@ -109,9 +117,11 @@ QueueHandle_t msgOutQ;
 
 //Sound Handling
 const int MAX_SOUNDS = 16;
+enum AudioCommandType {NOTE_ON, NOTE_OFF, HOLD_ON, HOLD_OFF, ROLE_CHANGE, SOUND_UPDATE};
 
 struct Sound {
     uint32_t step;
+    uint32_t effectiveStep; // Step after pitch modulation
     uint32_t phase;
     uint8_t volume;
     int32_t pitch;
@@ -122,7 +132,30 @@ struct Sound {
     bool remote; // Indicates if the sound was triggered by a remote message
 };
 
+struct AudioCommand {
+    AudioCommandType type;
+    SynthRole newRole; // Used only for ROLE_CHANGE commands
+    uint8_t key;
+    uint32_t step;
+    uint8_t volume;
+    int32_t pitch;
+    SynthWaveform waveform;
+    bool remote;
+    bool updatePitch;
+    bool updateVolume;
+    bool updateWave;
+    bool updateOctave;
+    int8_t octaveValue;
+};
+
 volatile Sound sounds[MAX_SOUNDS];
+volatile uint8_t freeSounds[MAX_SOUNDS];    
+volatile uint8_t freeTop = 0;
+
+constexpr int AUDIO_COMMAND_QUEUE_LENGTH = 32;
+AudioCommand audioCommandQueue[AUDIO_COMMAND_QUEUE_LENGTH];
+volatile uint8_t audioCommandWriteIdx = 0;
+volatile uint8_t audioCommandReadIdx = 0;
 
 //Pin definitions
   //Row select and enable
@@ -206,10 +239,152 @@ void setRow(uint8_t rowIdx){
 }
 
 // ================================================= //
+// ========= Interrupt Subroutine Helpers ===-====== //
+// ================================================= //
+void updateDisplayState() {
+    uint16_t activeNotes = 0;
+    for (int i = 0; i < MAX_SOUNDS; i++) {
+        if (sounds[i].active) {
+            activeNotes |= (1 << sounds[i].key);
+        }
+    }
+
+    sysState.displayState.activeNotes = activeNotes;
+}
+
+int allocateSound() {
+    if (freeTop == 0)
+        return -1; // no free voice
+
+    freeTop--;
+    return freeSounds[freeTop];
+}
+
+void freeSound(int idx) {
+    if (freeTop < MAX_SOUNDS) {
+        freeSounds[freeTop] = idx;
+        freeTop++;
+    }
+}
+
+void processAudioCommands() {
+    uint8_t writeIdx = audioCommandWriteIdx;
+    __DMB();
+    while (audioCommandReadIdx != writeIdx) {
+        AudioCommand cmd = audioCommandQueue[audioCommandReadIdx];
+        audioCommandReadIdx = (audioCommandReadIdx + 1) % AUDIO_COMMAND_QUEUE_LENGTH;
+
+        switch (cmd.type) {
+            case NOTE_ON: {
+                int idx = allocateSound();
+                if (idx >= 0) {
+                    sounds[idx].step = cmd.step;
+                    sounds[idx].pitch = cmd.pitch;
+
+                    int32_t offset = (cmd.step * (cmd.pitch >> 2)) >> 6;
+                    sounds[idx].effectiveStep = cmd.step + offset;
+                    sounds[idx].phase = 0;
+                    sounds[idx].volume = cmd.volume;
+                    sounds[idx].waveform = cmd.waveform;
+                    sounds[idx].key = cmd.key;
+                    sounds[idx].active = true;
+                    sounds[idx].held = false;
+                    sounds[idx].remote = cmd.remote;
+                }
+                break;
+            }
+            case NOTE_OFF: {
+                for (int i = 0; i < MAX_SOUNDS; i++) {
+                    if (sounds[i].active && sounds[i].key == cmd.key && sounds[i].remote == cmd.remote && !sounds[i].held) {
+                        sounds[i].active = false;
+                        freeSound(i);
+                    }
+                }
+                break;
+            }
+            case HOLD_ON: {
+                for (int i = 0; i < MAX_SOUNDS; i++) {
+                    if (sounds[i].active && !sounds[i].remote) {
+                        sounds[i].held = true;
+                    }
+                }
+                break;
+            }
+            case HOLD_OFF: {
+                for (int i = 0; i < MAX_SOUNDS; i++) {
+                    if (sounds[i].held && sounds[i].active) {
+                        sounds[i].active = false;
+                        freeSound(i);
+                    }
+                }
+                break;
+            }
+            case ROLE_CHANGE: {
+                if (cmd.newRole != RECEIVER) {
+                    // Leaving receiver so stop remote voices
+                    for (int i = 0; i < MAX_SOUNDS; i++) {
+                        if (sounds[i].remote && sounds[i].active) {
+                            sounds[i].active = false;
+                            freeSound(i);
+                        }
+                    }
+                }
+
+                if (cmd.newRole == SENDER) {
+                    // Clear local voices when entering sender
+                    for (int i = 0; i < MAX_SOUNDS; i++) {
+                        if (!sounds[i].remote && sounds[i].active) {
+                            sounds[i].active = false;
+                            freeSound(i);
+                        }
+                    }
+                }
+
+                break;
+            }
+            case SOUND_UPDATE: {
+                for (int i = 0; i < MAX_SOUNDS; i++) {
+                    if (!sounds[i].active) continue;
+                    if (sounds[i].held) continue;
+
+                    if (cmd.updateVolume) {
+                        sounds[i].volume = cmd.volume;
+                    }
+
+                    if (cmd.updateWave) {
+                        sounds[i].waveform = cmd.waveform;
+                    }
+
+                    if (cmd.updateOctave || cmd.updatePitch) {
+                        if (cmd.updatePitch) {
+                            sounds[i].pitch = cmd.pitch;
+                        }
+                        uint8_t octaveValue = cmd.updateOctave ? cmd.octaveValue : knobs[octaveIdx].getValue();
+
+                        uint32_t baseStep = stepSizes[sounds[i].key];
+
+                        int8_t shift = octaveValue - 4;
+                        if (shift > 0) baseStep <<= shift; 
+                        else if (shift < 0) baseStep >>= abs(shift);
+
+                        int32_t offset = (baseStep * (sounds[i].pitch >> 2)) >> 6;
+
+                        sounds[i].effectiveStep = baseStep + offset;
+                    }
+                }
+                break;
+            }
+        }
+    }
+}
+
+// ================================================= //
 // ============= Interrupt Subroutines ============= //
 // ================================================= //
 
 void sampleISR() {
+    processAudioCommands();
+
     int32_t mixedVout = 0;
     uint8_t activeNotes = 0;
     
@@ -217,10 +392,7 @@ void sampleISR() {
 
         if(!sounds[i].active) continue;
 
-        uint32_t step = sounds[i].step;
-        int pitchMod = sounds[i].pitch;
-        int32_t offset = (step * (pitchMod >> 2)) >> 6;
-        sounds[i].phase += (step + offset);
+        sounds[i].phase += sounds[i].effectiveStep;
         
         uint8_t index = sounds[i].phase >> 24;
         uint32_t uncenteredValue = 0;
@@ -259,8 +431,16 @@ void sampleISR() {
         activeNotes++;
     }
 
+    static const uint16_t invGain[] = {
+        0,
+        256/1, 256/2, 256/3, 256/4,
+        256/5, 256/6, 256/7, 256/8,
+        256/9, 256/10, 256/11, 256/12,
+        256/13, 256/14, 256/15, 256/16
+    };
+
     if (activeNotes > 0) {
-        mixedVout = mixedVout / activeNotes;
+        mixedVout = (mixedVout * invGain[activeNotes]) >> 8;
     }
 
     analogWrite(OUTR_PIN, mixedVout + 128);
@@ -291,6 +471,16 @@ void CAN_TX_ISR (void) {
 // ================== Task Helpers ================= //
 // ================================================= //
 
+void pushAudioCommand(const AudioCommand &audioCmd) {
+    uint8_t nextWriteIdx = (audioCommandWriteIdx + 1) % AUDIO_COMMAND_QUEUE_LENGTH;
+    
+    if (nextWriteIdx != audioCommandReadIdx) {
+        audioCommandQueue[audioCommandWriteIdx] = audioCmd;
+        __DMB();  // Ensure command is fully written before updating index
+        audioCommandWriteIdx = nextWriteIdx;
+    }
+}
+
 void handleSynthRole(bool westConnected, bool eastConnected, bool pitchPressed) {
     static SynthRole lastRole = SINGLE;
     static bool overwrittenAutoConfig = false;
@@ -313,20 +503,16 @@ void handleSynthRole(bool westConnected, bool eastConnected, bool pitchPressed) 
     } else if (!overwrittenAutoConfig && westConnected) {
         sysState.role = RECEIVER;
     }
-    
-    if ((lastRole != sysState.role) && (sysState.role != RECEIVER)) {
-        __disable_irq();
 
-        for (int i = 0; i < MAX_SOUNDS; i++) {
-            if (sounds[i].remote) {
-                sounds[i].active = false; // Stop any remote-triggered sounds when switching away from RECEIVER role
-            }
-            else if (sysState.role == SENDER) {
-                sounds[i].active = false;
-            }
-        }
+    // sysState.role = RECEIVER; // Force receiver role for profiling
 
-        __enable_irq();
+    if (sysState.role != lastRole) {
+
+        AudioCommand cmd;
+        cmd.type = ROLE_CHANGE;
+        cmd.newRole = sysState.role;
+
+        pushAudioCommand(cmd);
     }
     lastRole = sysState.role;
 }
@@ -361,25 +547,17 @@ void handleSwitches(bool volumePressed, bool wavePressed, bool octavePressed) {
     if (volumePressed) {
         localHold = true;
 
-        __disable_irq();
-        for (int i = 0; i < MAX_SOUNDS; i++) {
-            if (sounds[i].active && !sounds[i].remote) {
-                sounds[i].held = true;
-            }
-        }
-        __enable_irq();
+        AudioCommand cmd;
+        cmd.type = HOLD_ON;
+        pushAudioCommand(cmd);
     }
 
     if (wavePressed) {
         localHold = false;
         
-        __disable_irq();
-        for (int i = 0; i < MAX_SOUNDS; i++) {
-            if (sounds[i].held) {
-                sounds[i].active = false;
-            }
-        }
-        __enable_irq();
+        AudioCommand cmd;
+        cmd.type = HOLD_OFF;
+        pushAudioCommand(cmd);
     }
 
     xSemaphoreTake(sysState.mutex, portMAX_DELAY);
@@ -426,34 +604,30 @@ void constructAndSendTXMessage(std::bitset<32> &localInputs, std::bitset<32> &pr
     bool isPressed = (localInputs[keyIdx] == 0);
     bool wasPressed = (prevInputs[keyIdx] == 0);
 
+    xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+    uint8_t octave = sysState.displayState.octave;
+    xSemaphoreGive(sysState.mutex);
+
     if (isPressed != wasPressed) {
-        TX_Message[0] = isPressed ? 'P' : 'R';
-        TX_Message[1] = knobs[octaveIdx].getValue();
-        TX_Message[2] = keyIdx;
+        if (isPressed) {
+            TX_Message[0] = 'P';
+            TX_Message[1] = keyIdx;
+            TX_Message[2] = (int8_t)knobs[pitchIdx].getValue();
+            TX_Message[3] = knobs[waveIdx].getValue();
+            TX_Message[4] = knobs[octaveIdx].getValue();
+            TX_Message[5] = knobs[volumeIdx].getValue();
+        }
+        else {
+            TX_Message[0] = 'R';
+            TX_Message[1] = keyIdx;
+        }
+
         xQueueSend(msgOutQ, TX_Message.data(), 0); // If you spam keys this causes deadlocks if set to portMAX_DELAY
+
+        xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+        sysState.TX_Message = TX_Message;
+        xSemaphoreGive(sysState.mutex);
     }
-}
-
-int findFreeSound() {
-    for (int i = 0; i < MAX_SOUNDS; i++) {
-        if (!sounds[i].active)
-            return i;
-    }
-
-    // simple voice steal (oldest)
-    return 0;
-}
-
-void constructSound(volatile Sound &sound, uint32_t step, uint8_t key, bool isRemote) {
-    sound.step = step;
-    sound.phase = 0;
-    sound.volume = knobs[volumeIdx].getValue();
-    sound.pitch = knobs[pitchIdx].getValue();
-    sound.waveform = (SynthWaveform)knobs[waveIdx].getValue();
-    sound.key = key;
-    sound.active = true;
-    sound.held = false;
-    sound.remote = isRemote;
 }
 
 // ================================================= //
@@ -466,8 +640,11 @@ void scanKeysTask(void * pvParameters) {
 
     static std::bitset<32> prevInputs;
     static std::array<uint8_t, 8> TX_Message = {0};
-    // static uint32_t lastStepSizesSum = 0;
-    static bool lastHoldValue = false;
+    
+    static uint8_t lastPitch;
+    static uint8_t lastVolume;
+    static uint8_t lastWaveform;
+    static int8_t lastOctave;
     static bool westConnected = false;
     static bool eastConnected = false;
 
@@ -507,53 +684,98 @@ void scanKeysTask(void * pvParameters) {
         handleSwitches(knobs[volumeIdx].isPressed(), knobs[waveIdx].isPressed(), knobs[octaveIdx].isPressed());
 
         xSemaphoreTake(sysState.mutex, portMAX_DELAY);
-        sysState.inputs = localInputs;
-        bool localHold = sysState.hold;        
+        sysState.inputs = localInputs;    
         handleSynthRole(westConnected, eastConnected, pitchPressed);
         SynthRole localRole = sysState.role;
+        OctaveControlMode octaveMode = sysState.octaveMode;
         xSemaphoreGive(sysState.mutex);
+        bool isSender = (localRole == SENDER);
+        bool isSingle = (localRole == SINGLE);
 
         for (int i = 0; i < 12; i++) {
-
-            bool isPressed = (localInputs[i] == 0);
-            bool wasPressed = (prevInputs[i] == 0);
-
-            // KEY PRESS
-            if (isPressed && !wasPressed) {
-                uint32_t step = stepSizes[i];
-
-                int8_t shift = knobs[octaveIdx].getValue() - 4;
-
-                if (shift > 0) step <<= shift; 
-                else if (shift < 0) step >>= abs(shift);
-
-                int soundIdx = findFreeSound();
-
-                if (soundIdx >= 0) {
-                    __disable_irq();
-                    constructSound(sounds[soundIdx], step, i, false);
-                    __enable_irq();
-                }
-            }
-
-            // KEY RELEASE
-            if (!isPressed && wasPressed) {
-                __disable_irq();
-                for (int j = 0; j < MAX_SOUNDS; j++) {
-                    if (sounds[j].active && sounds[j].key == i && !sounds[j].held && !sounds[j].remote) {
-                        sounds[j].active = false;
-                    }
-                }
-                __enable_irq();
-            }
-
-            if (localRole == SENDER) {
+            if (!isSingle) {
                 constructAndSendTXMessage(localInputs, prevInputs, i, TX_Message);
+            } 
+            
+            if (!isSender) {
+
+                bool isPressed = (localInputs[i] == 0);
+                bool wasPressed = (prevInputs[i] == 0);
+
+                // KEY PRESS
+                if (isPressed && !wasPressed) {
+                    uint32_t step = stepSizes[i];
+
+                    int8_t shift = knobs[octaveIdx].getValue() - 4;
+
+                    if (shift > 0) step <<= shift; 
+                    else if (shift < 0) step >>= abs(shift);
+
+                    AudioCommand cmd;
+                    cmd.type = NOTE_ON;
+                    cmd.key = i;
+                    cmd.step = step;
+                    cmd.volume = knobs[volumeIdx].getValue();
+                    cmd.pitch = knobs[pitchIdx].getValue();
+                    cmd.waveform = (SynthWaveform)knobs[waveIdx].getValue();
+                    cmd.remote = false;
+
+                    pushAudioCommand(cmd);
+                }
+
+                // KEY RELEASE
+                if (!isPressed && wasPressed) {
+                    AudioCommand cmd;
+                    cmd.type = NOTE_OFF;
+                    cmd.key = i;
+                    cmd.remote = false;
+
+                    pushAudioCommand(cmd);
+                }
             }
+        }
+
+        uint8_t pitch = knobs[pitchIdx].getValue();
+        uint8_t volume = knobs[volumeIdx].getValue();
+        uint8_t waveform = knobs[waveIdx].getValue();
+        uint8_t octave = knobs[octaveIdx].getValue();
+
+        if (pitch != lastPitch || volume != lastVolume || waveform != lastWaveform || octave != lastOctave)
+        {
+            AudioCommand cmd;
+            cmd.type = SOUND_UPDATE;
+
+            cmd.updatePitch  = (pitch != lastPitch);
+            cmd.updateVolume = (volume != lastVolume);
+            cmd.updateWave   = (waveform != lastWaveform);
+            cmd.updateOctave = (octave != lastOctave);
+
+            cmd.pitch  = pitch;
+            cmd.volume = volume;
+            cmd.waveform = (SynthWaveform)waveform;
+            cmd.octaveValue = octave;
+
+            pushAudioCommand(cmd);
+
+            lastPitch  = pitch;
+            lastVolume = volume;
+            lastWaveform   = waveform;
+            lastOctave = octave;
         }
         #endif
         
         prevInputs = localInputs;
+        int octaveDisplayIdx = (octaveMode == OCTAVE_LOCAL) ? octaveIdx : octaveOffsetIdx;
+
+        xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+        sysState.displayState.waveform = knobs[waveIdx].getValue();
+        sysState.displayState.volume = knobs[volumeIdx].getValue();
+        sysState.displayState.pitch = knobs[pitchIdx].getValue();
+        sysState.displayState.octave = knobs[octaveDisplayIdx].getValue();
+        sysState.displayState.role = sysState.role;
+        sysState.displayState.octaveMode = sysState.octaveMode;
+        xSemaphoreGive(sysState.mutex);
+
     #ifndef DISABLE_THREADS
     }
     #endif
@@ -583,31 +805,42 @@ void decodeTask(void * pvParameters) {
       __atomic_store_n(&currentStepSize, localStepSize, __ATOMIC_RELAXED);
       #else
       if (localRole == RECEIVER) {
-          uint8_t key = localRX[2];
-          int8_t senderOctave = localRX[1];
-          int8_t octaveOffset = knobs[octaveOffsetIdx].getValue();
-          int8_t combinedOctave = std::clamp(senderOctave + octaveOffset, 0, 8);
+            if (localRX[0] == 'P') {
+                uint8_t key = localRX[1];
+                int32_t pitch = localRX[2];
+                SynthWaveform waveform = (SynthWaveform)localRX[3];
+                uint8_t senderOctave = localRX[4];
+                uint8_t volume = localRX[5];
+                
+                int8_t octaveOffset = knobs[octaveOffsetIdx].getValue();
+                int8_t combinedOctave = std::clamp(senderOctave + octaveOffset, 0, 8);
 
-          if (localRX[0] == 'P') {
+          
                 uint32_t step = stepSizes[key];
                 int8_t shift = combinedOctave - 4;
                 if (shift > 0) step <<= shift; 
                 else if (shift < 0) step >>= abs(shift);
 
-                int soundIdx = findFreeSound();
-                if (soundIdx >= 0) {
-                    __disable_irq();
-                    constructSound(sounds[soundIdx], step, key, true);
-                    __enable_irq();
-                }
+                AudioCommand cmd;
+                cmd.type = NOTE_ON;
+                cmd.key = key;
+                cmd.step = step;
+                cmd.volume = volume;
+                cmd.pitch = pitch;
+                cmd.waveform = waveform;
+                cmd.remote = true;
+
+                pushAudioCommand(cmd);
+                
           } else if (localRX[0] == 'R') {
-                __disable_irq();
-                for (int i = 0; i < MAX_SOUNDS; i++) {
-                    if (sounds[i].active && sounds[i].key == key && sounds[i].remote) {
-                        sounds[i].active = false;
-                    }
-                }
-                __enable_irq();
+                uint8_t key = localRX[1];
+
+                AudioCommand cmd;
+                cmd.type = NOTE_OFF;
+                cmd.key = key;
+                cmd.remote = true;
+
+                pushAudioCommand(cmd);
           }
 
           xSemaphoreTake(sysState.mutex, portMAX_DELAY);
@@ -644,12 +877,13 @@ void displayUpdateTask(void * pvParameters) {
       vTaskDelayUntil( &xLastWakeTime, xFrequency );
     #endif
     
-
       xSemaphoreTake(sysState.mutex, portMAX_DELAY);
       std::bitset<32> localInputs = sysState.inputs;
-      std::array<uint8_t, 8> localMsg = sysState.RX_Message;
+      std::array<uint8_t, 8> receivedMsg = sysState.RX_Message;
+      std::array<uint8_t, 8> sentMsg = sysState.TX_Message;
       SynthRole role = sysState.role;
       OctaveControlMode octaveMode = sysState.octaveMode;
+      DisplayState displayState = sysState.displayState;
       xSemaphoreGive(sysState.mutex);
       
       //Update display
@@ -669,34 +903,38 @@ void displayUpdateTask(void * pvParameters) {
       // Print the state of the first 12 keys as a Hex value
     //   u8g2.print(localInputs.to_ulong(), HEX);
       u8g2.print("Notes: ");
-    //   std::bitset<12> displayNotes = sysState.lastPressedKeys | sysState.heldKeys;
-    //   for (int i = 0; i < 12; i ++){
-    //     if (displayNotes[i])
-    //         u8g2.print(noteNames[i]);
-    //   }
-      u8g2.setCursor(2, 20);
-      u8g2.print("Wav: ");
-      u8g2.print(waveNames[knobs[waveIdx].getValue()]);
-      if (octaveMode == OCTAVE_OFFSET) {
-        u8g2.print(", Oct+:");
-        u8g2.print(knobs[octaveOffsetIdx].getValue());
-      } else {
-        u8g2.print(", Oct:");
-        u8g2.print(knobs[octaveIdx].getValue());
+      for (int i = 0; i < 12; i++) {
+          if (displayState.activeNotes & (1 << i)) {
+              u8g2.print(noteNames[i]);
+              u8g2.print(" ");
+          }
       }
-      u8g2.print(", Vol: "); 
-      u8g2.print(knobs[volumeIdx].getValue());
-      u8g2.setCursor(2,30);
-      u8g2.print("Pch: "); 
-      u8g2.print(knobs[pitchIdx].getValue());
-      if (role != SINGLE) {
-        u8g2.print(", ");
-        u8g2.print(localMsg[1]);
-        u8g2.print(localMsg[2]);
-        u8g2.print((char) localMsg[0]);
+      u8g2.print(", P: "); 
+      u8g2.print(displayState.pitch);
 
-        u8g2.print(", Role: ");
-        u8g2.print((role == SENDER) ? "S": "R");
+      u8g2.setCursor(2, 20);
+      u8g2.print("W: ");
+      u8g2.print(waveNames[displayState.waveform]);
+
+      u8g2.print((octaveMode == OCTAVE_OFFSET) ? ", O+:" : ", O:");
+      u8g2.print(displayState.octave);
+
+      u8g2.print(", V: "); 
+      u8g2.print(displayState.volume);
+
+      u8g2.setCursor(2, 30);
+      u8g2.print("R:");
+      u8g2.print(displayState.role == SENDER ? "S" : displayState.role == RECEIVER ? "R" : "1");
+
+      if (role != SINGLE) {
+        std::array<uint8_t, 8> msg = (role == SENDER) ? sentMsg : receivedMsg;
+        u8g2.print(", ");
+        u8g2.print((char)msg[0]);
+        u8g2.print(msg[1]);
+        u8g2.print(msg[2]);
+        u8g2.print(msg[3]);
+        u8g2.print(msg[4]);
+        u8g2.print(msg[5]);
     }
       #endif
       
@@ -813,12 +1051,12 @@ void initialiseThreads() {
     #endif
 }
 
-// void initialiseAtomicVariables() {
-//     for (int i = 0; i < 12; i++) {
-//         __atomic_store_n(&localStepSizesShared[i], 0, __ATOMIC_RELAXED);
-//         __atomic_store_n(&remoteStepSizesShared[i], 0, __ATOMIC_RELAXED);
-//     }
-// }
+void initSoundAllocator() {
+    for (uint8_t i = 0; i < MAX_SOUNDS; i++) {
+        freeSounds[i] = i;
+    }
+    freeTop = MAX_SOUNDS;
+}
 
 // ================================================= //
 // ===================== Setup ===================== //
@@ -843,8 +1081,8 @@ void setup() {
   //Initialise PCAL6408A (using i2cMutex)
   initialiseKnobs();
 
-  // Initialize the atomic variables before the timer starts
-//   initialiseAtomicVariables();
+  // Initialize the sounds
+  initSoundAllocator();
 
   // Initialise hardware timer
   initialiseHardwareTimer();
