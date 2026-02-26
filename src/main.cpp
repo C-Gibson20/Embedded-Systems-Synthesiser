@@ -909,11 +909,12 @@ void displayUpdateTask(void * pvParameters) {
               u8g2.print(" ");
           }
       }
-      u8g2.print(", P: "); 
+      
+      u8g2.setCursor(2, 20);
+      u8g2.print("P: "); 
       u8g2.print(displayState.pitch);
 
-      u8g2.setCursor(2, 20);
-      u8g2.print("W: ");
+      u8g2.print(", W: ");
       u8g2.print(waveNames[displayState.waveform]);
 
       u8g2.print((octaveMode == OCTAVE_OFFSET) ? ", O+:" : ", O:");
