@@ -73,19 +73,17 @@
 enum SynthRole { SENDER, RECEIVER, SINGLE };
 enum SynthWaveform {SQUARE, SAW, TRIANGLE, SINE, SUPERSAW, SINEFOLD};
 enum OctaveControlMode {OCTAVE_LOCAL, OCTAVE_OFFSET};
-volatile uint32_t localStepSizesShared[12] = {0};
-volatile uint32_t remoteStepSizesShared[12] = {0};
-uint32_t phaseAccumulators[12] = {0};
+// volatile uint32_t localStepSizesShared[12] = {0};
+// volatile uint32_t remoteStepSizesShared[12] = {0};
+// uint32_t phaseAccumulators[12] = {0};
 
 struct {
     SynthRole role = SINGLE;
     std::bitset<32> inputs;
-    std::bitset<12> lastPressedKeys;
     bool hold = false;
-    std::bitset<12> heldKeys;
     std::array<uint8_t, 8> RX_Message = {0};
     OctaveControlMode octaveMode = OCTAVE_LOCAL;
-    
+
     SemaphoreHandle_t mutex;
 } sysState;
 
@@ -108,6 +106,23 @@ const uint8_t pitchIdx = 0;
 //CAN Bus Communication
 QueueHandle_t msgInQ;
 QueueHandle_t msgOutQ;
+
+//Sound Handling
+const int MAX_SOUNDS = 16;
+
+struct Sound {
+    uint32_t step;
+    uint32_t phase;
+    uint8_t volume;
+    int32_t pitch;
+    SynthWaveform waveform;
+    uint8_t key;
+    bool active;
+    bool held;
+    bool remote; // Indicates if the sound was triggered by a remote message
+};
+
+volatile Sound sounds[MAX_SOUNDS];
 
 //Pin definitions
   //Row select and enable
@@ -197,21 +212,20 @@ void setRow(uint8_t rowIdx){
 void sampleISR() {
     int32_t mixedVout = 0;
     uint8_t activeNotes = 0;
-    int localVolumeShift = knobs[volumeIdx].getValue();
-    int pitchMod = knobs[pitchIdx].getValue();
-    SynthWaveform localWaveform = (SynthWaveform)knobs[waveIdx].getValue();
-    for (int i = 0; i < 12; i++) {
-        uint32_t localStep = __atomic_load_n(&localStepSizesShared[i], __ATOMIC_RELAXED);
-        uint32_t remoteStep = __atomic_load_n(&remoteStepSizesShared[i], __ATOMIC_RELAXED);
-        uint32_t step = localStep + remoteStep;
+    
+    for (int i = 0; i < MAX_SOUNDS; i++) {
 
-        if (step > 0) {
-            int32_t offset = (step * (pitchMod >> 2)) >> 6;
-            phaseAccumulators[i] += (step + offset);
-            uint8_t index = phaseAccumulators[i] >> 24;
-            uint32_t uncenteredValue = 0;
-            switch (localWaveform)
-            {
+        if(!sounds[i].active) continue;
+
+        uint32_t step = sounds[i].step;
+        int pitchMod = sounds[i].pitch;
+        int32_t offset = (step * (pitchMod >> 2)) >> 6;
+        sounds[i].phase += (step + offset);
+        
+        uint8_t index = sounds[i].phase >> 24;
+        uint32_t uncenteredValue = 0;
+
+        switch (sounds[i].waveform) {
             case SQUARE:
                 uncenteredValue = (index < 128) ? 255 : 0;
                 break;
@@ -219,42 +233,36 @@ void sampleISR() {
                 uncenteredValue = index;
                 break;
             case TRIANGLE:
-                if (index < 128) {
-                    uncenteredValue = index << 1; // 0 to 254
-                } else {
-                    uncenteredValue = 511 - (index << 1); // 255 down to 1
-                }
+                uncenteredValue = (index < 128) ? (index << 1) : (511 - (index << 1));
                 break;
             case SINE:
                 uncenteredValue = sineTable[index];
                 break;
             case SUPERSAW: {
-                // Phase-shifted version mixed with the original
-                // This creates a "chorus" or "thickening" effect
                 uint8_t saw1 = index;
                 uint8_t saw2 = (index + (index >> 2)) & 0xFF; 
                 uncenteredValue = (saw1 + saw2) >> 1;
                 break;
             }
             case SINEFOLD: {
-                int16_t val = (sineTable[index] - 128) * 2; // Double the amplitude
-                if (val > 127) val = 255 - val;             // Fold the top
-                if (val < -128) val = -255 - val;           // Fold the bottom
+                int16_t val = (sineTable[index] - 128) * 2; 
+                if (val > 127) val = 255 - val;             
+                if (val < -128) val = -255 - val;           
                 uncenteredValue = val + 128;
                 break;
             }
-            default:
-                break;
-            }
-            int32_t noteVout = (int32_t)(uncenteredValue) - 128;
-            mixedVout += noteVout;
-            activeNotes++;
         }
+
+        int32_t noteVout = (int32_t)(uncenteredValue) - 128;
+        noteVout >>= (8 - sounds[i].volume); // Apply volume control
+        mixedVout += noteVout;
+        activeNotes++;
     }
+
     if (activeNotes > 0) {
         mixedVout = mixedVout / activeNotes;
     }
-    mixedVout = mixedVout >> (8 - localVolumeShift);
+
     analogWrite(OUTR_PIN, mixedVout + 128);
 }
 
@@ -307,13 +315,18 @@ void handleSynthRole(bool westConnected, bool eastConnected, bool pitchPressed) 
     }
     
     if ((lastRole != sysState.role) && (sysState.role != RECEIVER)) {
-        for (int i = 0; i < 12; i++) {
-            __atomic_store_n(&remoteStepSizesShared[i], 0, __ATOMIC_RELAXED);
+        __disable_irq();
 
-            if (sysState.role == SENDER) {
-                __atomic_store_n(&localStepSizesShared[i], 0, __ATOMIC_RELAXED);
+        for (int i = 0; i < MAX_SOUNDS; i++) {
+            if (sounds[i].remote) {
+                sounds[i].active = false; // Stop any remote-triggered sounds when switching away from RECEIVER role
+            }
+            else if (sysState.role == SENDER) {
+                sounds[i].active = false;
             }
         }
+
+        __enable_irq();
     }
     lastRole = sysState.role;
 }
@@ -341,17 +354,36 @@ void updateRotations(uint8_t rowIdx, std::bitset<4> cols, OctaveControlMode loca
 }
 
 void handleSwitches(bool volumePressed, bool wavePressed, bool octavePressed) {
+    xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+    bool localHold = sysState.hold;
+    xSemaphoreGive(sysState.mutex);
+
     if (volumePressed) {
-        sysState.hold = true;
-        sysState.heldKeys |= sysState.lastPressedKeys;
+        localHold = true;
+
+        __disable_irq();
+        for (int i = 0; i < MAX_SOUNDS; i++) {
+            if (sounds[i].active && !sounds[i].remote) {
+                sounds[i].held = true;
+            }
+        }
+        __enable_irq();
     }
 
     if (wavePressed) {
-        sysState.hold = false;
-        sysState.heldKeys.reset();
+        localHold = false;
+        
+        __disable_irq();
+        for (int i = 0; i < MAX_SOUNDS; i++) {
+            if (sounds[i].held) {
+                sounds[i].active = false;
+            }
+        }
+        __enable_irq();
     }
 
     xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+    sysState.hold = localHold;
     SynthRole role = sysState.role;
     if ((role == RECEIVER) && (octavePressed)) {
         sysState.octaveMode = (sysState.octaveMode == OCTAVE_LOCAL) ? OCTAVE_OFFSET : OCTAVE_LOCAL;
@@ -390,32 +422,38 @@ void mapColumnsToSet(std::bitset<32> &localInputs, std::bitset<4> cols, uint8_t 
     }
 }
 
-void constructAndSendTXMessage(
-  std::bitset<32> localInputs, 
-  std::bitset<32> prevInputs, 
-  uint8_t keyIdx, 
-  std::array<uint8_t, 8> &TX_Message,
-  uint32_t localStepSizes [12],
-  std::bitset<12> &localLastKeys
-) {
+void constructAndSendTXMessage(std::bitset<32> &localInputs, std::bitset<32> &prevInputs, uint8_t keyIdx, std::array<uint8_t, 8> &TX_Message) {
     bool isPressed = (localInputs[keyIdx] == 0);
     bool wasPressed = (prevInputs[keyIdx] == 0);
-    int octave = knobs[octaveIdx].getValue();
-
-    if (isPressed) {
-        localStepSizes[keyIdx] = stepSizes[keyIdx];
-        int8_t shift = octave - 4;
-        if (shift > 0) localStepSizes[keyIdx] <<= shift; 
-        else if (shift < 0) localStepSizes[keyIdx] >>= abs(shift);
-        localLastKeys[keyIdx] = 1;
-    }
 
     if (isPressed != wasPressed) {
         TX_Message[0] = isPressed ? 'P' : 'R';
-        TX_Message[1] = octave;
+        TX_Message[1] = knobs[octaveIdx].getValue();
         TX_Message[2] = keyIdx;
         xQueueSend(msgOutQ, TX_Message.data(), 0); // If you spam keys this causes deadlocks if set to portMAX_DELAY
     }
+}
+
+int findFreeSound() {
+    for (int i = 0; i < MAX_SOUNDS; i++) {
+        if (!sounds[i].active)
+            return i;
+    }
+
+    // simple voice steal (oldest)
+    return 0;
+}
+
+void constructSound(volatile Sound &sound, uint32_t step, uint8_t key, bool isRemote) {
+    sound.step = step;
+    sound.phase = 0;
+    sound.volume = knobs[volumeIdx].getValue();
+    sound.pitch = knobs[pitchIdx].getValue();
+    sound.waveform = (SynthWaveform)knobs[waveIdx].getValue();
+    sound.key = key;
+    sound.active = true;
+    sound.held = false;
+    sound.remote = isRemote;
 }
 
 // ================================================= //
@@ -428,7 +466,7 @@ void scanKeysTask(void * pvParameters) {
 
     static std::bitset<32> prevInputs;
     static std::array<uint8_t, 8> TX_Message = {0};
-    static uint32_t lastStepSizesSum = 0;
+    // static uint32_t lastStepSizesSum = 0;
     static bool lastHoldValue = false;
     static bool westConnected = false;
     static bool eastConnected = false;
@@ -450,19 +488,10 @@ void scanKeysTask(void * pvParameters) {
             delayMicroseconds(3);
             std::bitset<4> cols = readCols();
 
-            // Update knob rotations
             updateRotations(i, cols, localOctaveMode); 
-
-            // Map rows 5 and 6 to knob switches
-            // and updates east and west connections
             updateSwitchesAndConnections(cols, i, westConnected, eastConnected);
-
-            // Map columns into 32-bit set
             mapColumnsToSet(localInputs, cols, i);
         }
-
-        uint32_t localStepSizes[12] = {0};
-        std::bitset<12> localLastKeys;
 
         #ifdef PROFILE_SCANKEYS
             // WCET: Force 12 messages to be sent every time regardless of actual state
@@ -473,32 +502,58 @@ void scanKeysTask(void * pvParameters) {
                 xQueueSend(msgOutQ, TX_Message.data(), 0); // Non-blocking send
             }
         #else
-        for (int i = 0; i < 12; i++) {
-            constructAndSendTXMessage(localInputs, prevInputs, i, TX_Message, localStepSizes, localLastKeys);
-        }
-        #endif
         
-        uint64_t localStepSizesSum = std::reduce(localStepSizes, localStepSizes + 12, 0);
-        prevInputs = localInputs;
-
         bool pitchPressed = knobs[pitchIdx].isPressed();
         handleSwitches(knobs[volumeIdx].isPressed(), knobs[waveIdx].isPressed(), knobs[octaveIdx].isPressed());
 
         xSemaphoreTake(sysState.mutex, portMAX_DELAY);
         sysState.inputs = localInputs;
-        sysState.lastPressedKeys = localLastKeys;
+        bool localHold = sysState.hold;        
         handleSynthRole(westConnected, eastConnected, pitchPressed);
+        SynthRole localRole = sysState.role;
         xSemaphoreGive(sysState.mutex);
 
-        // Only the single and receiver updates the local sound
-        if (((sysState.role == RECEIVER) || (sysState.role == SINGLE)) && (localStepSizesSum != lastStepSizesSum || lastHoldValue != sysState.hold)) {
-            for (int i = 0; i < 12; i++) {
-                if ( !(sysState.hold && sysState.heldKeys[i]) )
-                    __atomic_store_n(&localStepSizesShared[i], localStepSizes[i], __ATOMIC_RELAXED);
+        for (int i = 0; i < 12; i++) {
+
+            bool isPressed = (localInputs[i] == 0);
+            bool wasPressed = (prevInputs[i] == 0);
+
+            // KEY PRESS
+            if (isPressed && !wasPressed) {
+                uint32_t step = stepSizes[i];
+
+                int8_t shift = knobs[octaveIdx].getValue() - 4;
+
+                if (shift > 0) step <<= shift; 
+                else if (shift < 0) step >>= abs(shift);
+
+                int soundIdx = findFreeSound();
+
+                if (soundIdx >= 0) {
+                    __disable_irq();
+                    constructSound(sounds[soundIdx], step, i, false);
+                    __enable_irq();
+                }
             }
-            lastStepSizesSum = localStepSizesSum;
-            lastHoldValue = sysState.hold;
-        } 
+
+            // KEY RELEASE
+            if (!isPressed && wasPressed) {
+                __disable_irq();
+                for (int j = 0; j < MAX_SOUNDS; j++) {
+                    if (sounds[j].active && sounds[j].key == i && !sounds[j].held && !sounds[j].remote) {
+                        sounds[j].active = false;
+                    }
+                }
+                __enable_irq();
+            }
+
+            if (localRole == SENDER) {
+                constructAndSendTXMessage(localInputs, prevInputs, i, TX_Message);
+            }
+        }
+        #endif
+        
+        prevInputs = localInputs;
     #ifndef DISABLE_THREADS
     }
     #endif
@@ -533,16 +588,27 @@ void decodeTask(void * pvParameters) {
           int8_t octaveOffset = knobs[octaveOffsetIdx].getValue();
           int8_t combinedOctave = std::clamp(senderOctave + octaveOffset, 0, 8);
 
-          uint32_t step = 0;
           if (localRX[0] == 'P') {
-                step = stepSizes[key];
-              
+                uint32_t step = stepSizes[key];
                 int8_t shift = combinedOctave - 4;
                 if (shift > 0) step <<= shift; 
                 else if (shift < 0) step >>= abs(shift);
-          }
 
-          __atomic_store_n(&remoteStepSizesShared[key], step, __ATOMIC_RELAXED);
+                int soundIdx = findFreeSound();
+                if (soundIdx >= 0) {
+                    __disable_irq();
+                    constructSound(sounds[soundIdx], step, key, true);
+                    __enable_irq();
+                }
+          } else if (localRX[0] == 'R') {
+                __disable_irq();
+                for (int i = 0; i < MAX_SOUNDS; i++) {
+                    if (sounds[i].active && sounds[i].key == key && sounds[i].remote) {
+                        sounds[i].active = false;
+                    }
+                }
+                __enable_irq();
+          }
 
           xSemaphoreTake(sysState.mutex, portMAX_DELAY);
           sysState.RX_Message = localRX;
@@ -603,11 +669,11 @@ void displayUpdateTask(void * pvParameters) {
       // Print the state of the first 12 keys as a Hex value
     //   u8g2.print(localInputs.to_ulong(), HEX);
       u8g2.print("Notes: ");
-      std::bitset<12> displayNotes = sysState.lastPressedKeys | sysState.heldKeys;
-      for (int i = 0; i < 12; i ++){
-        if (displayNotes[i])
-            u8g2.print(noteNames[i]);
-      }
+    //   std::bitset<12> displayNotes = sysState.lastPressedKeys | sysState.heldKeys;
+    //   for (int i = 0; i < 12; i ++){
+    //     if (displayNotes[i])
+    //         u8g2.print(noteNames[i]);
+    //   }
       u8g2.setCursor(2, 20);
       u8g2.print("Wav: ");
       u8g2.print(waveNames[knobs[waveIdx].getValue()]);
@@ -622,12 +688,12 @@ void displayUpdateTask(void * pvParameters) {
       u8g2.print(knobs[volumeIdx].getValue());
       u8g2.setCursor(2,30);
       u8g2.print("Pch: "); 
-      u8g2.print((char) localMsg[0]);
+      u8g2.print(knobs[pitchIdx].getValue());
       if (role != SINGLE) {
         u8g2.print(", ");
         u8g2.print(localMsg[1]);
         u8g2.print(localMsg[2]);
-        u8g2.print(knobs[pitchIdx].getValue());
+        u8g2.print((char) localMsg[0]);
 
         u8g2.print(", Role: ");
         u8g2.print((role == SENDER) ? "S": "R");
@@ -740,19 +806,19 @@ void initialiseThreads() {
     TaskHandle_t decodeHandle = NULL;
     TaskHandle_t displayUpdateHandle = NULL;
     TaskHandle_t canTxHandle = NULL;
-    xTaskCreate(scanKeysTask, "scanKeys", 128, NULL, 4, &scanKeysHandle);
+    xTaskCreate(scanKeysTask, "scanKeys", 256, NULL, 4, &scanKeysHandle);
     xTaskCreate(displayUpdateTask, "displayUpdate", 256, NULL, 1, &displayUpdateHandle);
-    xTaskCreate(decodeTask, "decode", 128, NULL, 2, &decodeHandle);
+    xTaskCreate(decodeTask, "decode", 256, NULL, 2, &decodeHandle);
     xTaskCreate(CAN_TX_Task, "canTX", 128, NULL, 2, &canTxHandle);
     #endif
 }
 
-void initialiseAtomicVariables() {
-    for (int i = 0; i < 12; i++) {
-        __atomic_store_n(&localStepSizesShared[i], 0, __ATOMIC_RELAXED);
-        __atomic_store_n(&remoteStepSizesShared[i], 0, __ATOMIC_RELAXED);
-    }
-}
+// void initialiseAtomicVariables() {
+//     for (int i = 0; i < 12; i++) {
+//         __atomic_store_n(&localStepSizesShared[i], 0, __ATOMIC_RELAXED);
+//         __atomic_store_n(&remoteStepSizesShared[i], 0, __ATOMIC_RELAXED);
+//     }
+// }
 
 // ================================================= //
 // ===================== Setup ===================== //
@@ -778,7 +844,7 @@ void setup() {
   initialiseKnobs();
 
   // Initialize the atomic variables before the timer starts
-  initialiseAtomicVariables();
+//   initialiseAtomicVariables();
 
   // Initialise hardware timer
   initialiseHardwareTimer();
