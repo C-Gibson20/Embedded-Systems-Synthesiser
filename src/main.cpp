@@ -72,8 +72,7 @@
 //Shared state
 enum SynthRole { SENDER, RECEIVER, SINGLE };
 enum SynthWaveform {SQUARE, SAW, TRIANGLE, SINE, SUPERSAW, SINEFOLD};
-// volatile uint32_t currentStepSize = 0;
-// volatile uint32_t currentStepSizes[12] = {0};
+enum OctaveControlMode {OCTAVE_LOCAL, OCTAVE_OFFSET};
 volatile uint32_t localStepSizesShared[12] = {0};
 volatile uint32_t remoteStepSizesShared[12] = {0};
 uint32_t phaseAccumulators[12] = {0};
@@ -85,20 +84,24 @@ struct {
     bool hold = false;
     std::bitset<12> heldKeys;
     std::array<uint8_t, 8> RX_Message = {0};
+    OctaveControlMode octaveMode = OCTAVE_LOCAL;
+    
     SemaphoreHandle_t mutex;
 } sysState;
 
 // SemaphoreHandle_t knobSemaphore;
 SemaphoreHandle_t CAN_TX_Semaphore;
 
-Knob knobs[4] = {
+Knob knobs[5] = {
     Knob(0, -128, 127),
     Knob(0, 0, 5),
-    Knob(4, 0, 8),
-    Knob(2, 0, 8)  
+    Knob(4, 0, 8), // Local octave control
+    Knob(2, 0, 8),
+    Knob(0, -8, 8) // Octave offset for RECEIVER role when in OCTAVE_OFFSET mode  
 };
 const uint8_t volumeIdx = 3;
 const uint8_t octaveIdx = 2;
+const uint8_t octaveOffsetIdx = 4;
 const uint8_t waveIdx = 1;
 const uint8_t pitchIdx = 0;
 
@@ -280,7 +283,7 @@ void CAN_TX_ISR (void) {
 // ================== Task Helpers ================= //
 // ================================================= //
 
-void handleSynthRole(bool westConnected, bool eastConnected, bool octavePressed) {
+void handleSynthRole(bool westConnected, bool eastConnected, bool pitchPressed) {
     static SynthRole lastRole = SINGLE;
     static bool overwrittenAutoConfig = false;
 
@@ -291,7 +294,7 @@ void handleSynthRole(bool westConnected, bool eastConnected, bool octavePressed)
     }
     
     // Manual override if connected to at least one other device
-    else if (octavePressed) {
+    else if (pitchPressed) {
         overwrittenAutoConfig = true;
         sysState.role = (sysState.role == SENDER) ? RECEIVER : SENDER;
     }
@@ -315,7 +318,29 @@ void handleSynthRole(bool westConnected, bool eastConnected, bool octavePressed)
     lastRole = sysState.role;
 }
 
-void handleHeldKeys(bool volumePressed, bool wavePressed) {
+void updateRotations(uint8_t rowIdx, std::bitset<4> cols, OctaveControlMode localOctaveMode) {
+    #ifdef V1
+    if (3 <= rowIdx  && rowIdx < 5) {
+        uint8_t knobIndex = (rowIdx == 3) ? 3 : 1;
+        uint8_t offset = ((knobIndex == 3) && (localOctaveMode == OCTAVE_LOCAL)) ? -1 : +1; 
+
+        knobs[knobIndex].updateRotation(cols[0],cols[1]);
+        knobs[knobIndex + offset].updateRotation(cols[2],cols[3]);
+    }
+    #elifdef V2
+    if (rowIdx == 3) {
+        knobs[3].updateRotation(cols[0], cols[1]);
+        knobs[0].updateRotation(cols[2], cols[3]);
+    }
+    if (rowIdx == 4) {
+        uint8_t octaveModeKnobIdx = (localOctaveMode == OCTAVE_LOCAL) ? octaveIdx : octaveOffsetIdx;
+        knobs[octaveModeKnobIdx].updateRotation(cols[0], cols[1]);
+        knobs[1].updateRotation(cols[2], cols[3]);
+    }
+    #endif
+}
+
+void handleSwitches(bool volumePressed, bool wavePressed, bool octavePressed) {
     if (volumePressed) {
         sysState.hold = true;
         sysState.heldKeys |= sysState.lastPressedKeys;
@@ -325,31 +350,21 @@ void handleHeldKeys(bool volumePressed, bool wavePressed) {
         sysState.hold = false;
         sysState.heldKeys.reset();
     }
-}
 
-void updateRotations(uint8_t rowIdx, std::bitset<4> cols) {
-    #ifdef V1
-    if (3 <= rowIdx  && rowIdx < 5) {
-        uint8_t knobIndex = (rowIdx == 3) ? 3 : 1;
-        knobs[knobIndex].updateRotation(cols[0],cols[1]);
-        knobs[knobIndex-1].updateRotation(cols[2],cols[3]);
+    xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+    SynthRole role = sysState.role;
+    if ((role == RECEIVER) && (octavePressed)) {
+        sysState.octaveMode = (sysState.octaveMode == OCTAVE_LOCAL) ? OCTAVE_OFFSET : OCTAVE_LOCAL;
     }
-    #elifdef V2
-    if (rowIdx == 3) {
-        knobs[3].updateRotation(cols[0], cols[1]);
-        knobs[0].updateRotation(cols[2], cols[3]);
-    }
-    if (rowIdx == 4) {
-        knobs[2].updateRotation(cols[0], cols[1]);
-        knobs[1].updateRotation(cols[2], cols[3]);
-    }
-    #endif
+    xSemaphoreGive(sysState.mutex);
 }
 
 void updateSwitchesAndConnections(std::bitset<4> cols, uint8_t rowIdx, bool &westConnected, bool &eastConnected) {
     if (rowIdx == 5) {
         westConnected = (cols[3] == 0);
+
         #ifdef V1
+
         knobs[2].updateSwitch(cols[0]); // C0: Knob 0 S
         knobs[3].updateSwitch(cols[1]); // C1: Knob 3 S
         #elifdef V2
@@ -363,7 +378,7 @@ void updateSwitchesAndConnections(std::bitset<4> cols, uint8_t rowIdx, bool &wes
         knobs[1].updateSwitch(cols[1]); // C1: Knob 2 S
         #elifdef V2
         knobs[1].updateSwitch(cols[0]); // C0: Knob 1 S
-        knobs[2].updateSwitch(cols[1]); // C1: Knob 2 S
+        knobs[2].updateSwitch(cols[1]); // C1: Knob 2 S 
         #endif
     }
 }
@@ -423,6 +438,10 @@ void scanKeysTask(void * pvParameters) {
         vTaskDelayUntil( &xLastWakeTime, xFrequency );
     #endif
 
+        xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+        OctaveControlMode localOctaveMode = sysState.octaveMode;
+        xSemaphoreGive(sysState.mutex);
+
         // Key scanning loop for Rows 0-2
         std::bitset<32> localInputs;
         for (int i = 0; i < 7; i++) { 
@@ -432,7 +451,7 @@ void scanKeysTask(void * pvParameters) {
             std::bitset<4> cols = readCols();
 
             // Update knob rotations
-            updateRotations(i, cols); 
+            updateRotations(i, cols, localOctaveMode); 
 
             // Map rows 5 and 6 to knob switches
             // and updates east and west connections
@@ -459,16 +478,16 @@ void scanKeysTask(void * pvParameters) {
         }
         #endif
         
-        uint64_t localStepSizesSum = std::reduce(localStepSizes,localStepSizes+12,0);
+        uint64_t localStepSizesSum = std::reduce(localStepSizes, localStepSizes + 12, 0);
         prevInputs = localInputs;
 
-        bool octavePressed = knobs[octaveIdx].isPressed();
-        handleHeldKeys(knobs[volumeIdx].isPressed(), knobs[waveIdx].isPressed());
+        bool pitchPressed = knobs[pitchIdx].isPressed();
+        handleSwitches(knobs[volumeIdx].isPressed(), knobs[waveIdx].isPressed(), knobs[octaveIdx].isPressed());
 
         xSemaphoreTake(sysState.mutex, portMAX_DELAY);
         sysState.inputs = localInputs;
         sysState.lastPressedKeys = localLastKeys;
-        handleSynthRole(westConnected, eastConnected, octavePressed);
+        handleSynthRole(westConnected, eastConnected, pitchPressed);
         xSemaphoreGive(sysState.mutex);
 
         // Only the single and receiver updates the local sound
@@ -511,12 +530,14 @@ void decodeTask(void * pvParameters) {
       if (localRole == RECEIVER) {
           uint8_t key = localRX[2];
           int8_t senderOctave = localRX[1];
+          int8_t octaveOffset = knobs[octaveOffsetIdx].getValue();
+          int8_t combinedOctave = std::clamp(senderOctave + octaveOffset, 0, 8);
 
           uint32_t step = 0;
           if (localRX[0] == 'P') {
                 step = stepSizes[key];
               
-                int8_t shift = senderOctave - 4;
+                int8_t shift = combinedOctave - 4;
                 if (shift > 0) step <<= shift; 
                 else if (shift < 0) step >>= abs(shift);
           }
@@ -562,6 +583,7 @@ void displayUpdateTask(void * pvParameters) {
       std::bitset<32> localInputs = sysState.inputs;
       std::array<uint8_t, 8> localMsg = sysState.RX_Message;
       SynthRole role = sysState.role;
+      OctaveControlMode octaveMode = sysState.octaveMode;
       xSemaphoreGive(sysState.mutex);
       
       //Update display
@@ -589,17 +611,24 @@ void displayUpdateTask(void * pvParameters) {
       u8g2.setCursor(2, 20);
       u8g2.print("Wav: ");
       u8g2.print(waveNames[knobs[waveIdx].getValue()]);
-      u8g2.print(", Oct: "); 
-      u8g2.print(knobs[octaveIdx].getValue());
+      if (octaveMode == OCTAVE_OFFSET) {
+        u8g2.print(", Oct+:");
+        u8g2.print(knobs[octaveOffsetIdx].getValue());
+      } else {
+        u8g2.print(", Oct:");
+        u8g2.print(knobs[octaveIdx].getValue());
+      }
       u8g2.print(", Vol: "); 
       u8g2.print(knobs[volumeIdx].getValue());
       u8g2.setCursor(2,30);
+      u8g2.print("Pch: "); 
       u8g2.print((char) localMsg[0]);
-      u8g2.print(localMsg[1]);
-      u8g2.print(localMsg[2]);
-      u8g2.print(", Pch: "); 
-      u8g2.print(knobs[pitchIdx].getValue());
       if (role != SINGLE) {
+        u8g2.print(", ");
+        u8g2.print(localMsg[1]);
+        u8g2.print(localMsg[2]);
+        u8g2.print(knobs[pitchIdx].getValue());
+
         u8g2.print(", Role: ");
         u8g2.print((role == SENDER) ? "S": "R");
     }
@@ -665,7 +694,7 @@ void initialiseCANBus() {
 void initialiseKnobs() {
     sysState.mutex = xSemaphoreCreateMutex();
     
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 5; i++) {
         knobs[i].begin();
     }
     for (int i = 3; i < 5; i++) {
@@ -677,6 +706,10 @@ void initialiseKnobs() {
         uint8_t knobIndex = (i == 3) ? 3 : 1;
         knobs[knobIndex].setInitialState(cols[0],cols[1]);
         knobs[knobIndex-1].setInitialState(cols[2],cols[3]);
+        if (i == 3) {
+            knobs[4].setInitialState(cols[2], cols[3]);
+        }
+
         #elifdef V2
         if (i == 3) {
             knobs[3].setInitialState(cols[0], cols[1]);
@@ -684,6 +717,7 @@ void initialiseKnobs() {
         }
         if (i == 4) {
             knobs[2].setInitialState(cols[0], cols[1]);
+            knobs[4].setInitialState(cols[0], cols[1]);
             knobs[1].setInitialState(cols[2], cols[3]);
         }
         #endif
