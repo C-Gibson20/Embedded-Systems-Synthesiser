@@ -10,8 +10,8 @@
 
 /* --- PROFILING SYSTEM --- */
 // #define PROFILING_MODE           // Disables scheduler and ISRs globally
-#define V1
-// #define V2
+// #define V1
+#define V2
 #ifdef PROFILING_MODE
   // #define DISABLE_THREADS
   // #define DISABLE_ISRS
@@ -72,8 +72,10 @@
 //Shared state
 enum SynthRole { SENDER, RECEIVER };
 enum SynthWaveform {SQUARE, SAW, TRIANGLE, SINE, SUPERSAW, SINEFOLD};
-volatile uint32_t currentStepSize = 0;
-volatile uint32_t currentStepSizes[12] = {0};
+// volatile uint32_t currentStepSize = 0;
+// volatile uint32_t currentStepSizes[12] = {0};
+volatile uint32_t localStepSizesShared[12] = {0};
+volatile uint32_t remoteStepSizesShared[12] = {0};
 uint32_t phaseAccumulators[12] = {0};
 
 struct {
@@ -196,7 +198,9 @@ void sampleISR() {
     int pitchMod = knobs[pitchIdx].getValue();
     SynthWaveform localWaveform = (SynthWaveform)knobs[waveIdx].getValue();
     for (int i = 0; i < 12; i++) {
-        uint32_t step = __atomic_load_n(&currentStepSizes[i], __ATOMIC_RELAXED);
+        uint32_t localStep = __atomic_load_n(&localStepSizesShared[i], __ATOMIC_RELAXED);
+        uint32_t remoteStep = __atomic_load_n(&remoteStepSizesShared[i], __ATOMIC_RELAXED);
+        uint32_t step = localStep + remoteStep;
 
         if (step > 0) {
             int32_t offset = (step * (pitchMod >> 2)) >> 6;
@@ -251,16 +255,6 @@ void sampleISR() {
     analogWrite(OUTR_PIN, mixedVout + 128);
 }
 
-// void knobISR() {
-//   #ifdef PROFILING_MODE
-//   xSemaphoreGive(knobSemaphore);
-//   #else
-//   BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-//   xSemaphoreGiveFromISR(knobSemaphore, &xHigherPriorityTaskWoken);
-//   portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
-//   #endif
-// }
-
 void CAN_RX_ISR (void) {
     std::array<uint8_t, 8> RX_Message_ISR;
     uint32_t ID;
@@ -310,10 +304,29 @@ void handleSynthRole(bool westConnected, bool eastConnected, bool octavePressed,
 
     if (sysState.role == SENDER) {
         for (int i = 0; i < 12; i++) {
-                __atomic_store_n(&currentStepSizes[i], 0, __ATOMIC_RELAXED);
+            __atomic_store_n(&remoteStepSizesShared[i], 0, __ATOMIC_RELAXED);
+            __atomic_store_n(&localStepSizesShared[i], 0, __ATOMIC_RELAXED);
         }
-        // __atomic_store_n(&currentStepSize, 0, __ATOMIC_RELAXED); // Silent Sender
     }
+}
+
+void updateRotations(uint8_t rowIdx, std::bitset<4> cols) {
+    #ifdef V1
+    if (3 <= rowIdx  && rowIdx < 5) {
+        uint8_t knobIndex = (rowIdx == 3) ? 3 : 1;
+        knobs[knobIndex].updateRotation(cols[0],cols[1]);
+        knobs[knobIndex-1].updateRotation(cols[2],cols[3]);
+    }
+    #elifdef V2
+    if (rowIdx == 3) {
+        knobs[3].updateRotation(cols[0], cols[1]);
+        knobs[0].updateRotation(cols[2], cols[3]);
+    }
+    if (rowIdx == 4) {
+        knobs[2].updateRotation(cols[0], cols[1]);
+        knobs[1].updateRotation(cols[2], cols[3]);
+    }
+    #endif
 }
 
 void updateSwitchesAndConnections(std::bitset<4> cols, uint8_t rowIdx, bool &westConnected, bool &eastConnected) {
@@ -401,22 +414,9 @@ void scanKeysTask(void * pvParameters) {
             delayMicroseconds(3);
             std::bitset<4> cols = readCols();
 
-            #ifdef V1
-            if (3 <= i  && i < 5) {
-                uint8_t knobIndex = (i == 3) ? 3 : 1;
-                knobs[knobIndex].updateRotation(cols[0],cols[1]);
-                knobs[knobIndex-1].updateRotation(cols[2],cols[3]);
-            }
-            #elifdef V2
-            if (i == 3) {
-                knobs[3].updateRotation(cols[0], cols[1]);
-                knobs[0].updateRotation(cols[2], cols[3]);
-            }
-            if (i == 4) {
-                knobs[2].updateRotation(cols[0], cols[1]);
-                knobs[1].updateRotation(cols[2], cols[3]);
-            }
-            #endif
+            // Update knob rotations
+            updateRotations(i, cols); 
+
             // Map rows 5 and 6 to knob switches
             // and updates east and west connections
             updateSwitchesAndConnections(cols, i, westConnected, eastConnected);
@@ -441,12 +441,14 @@ void scanKeysTask(void * pvParameters) {
             constructAndSendTXMessage(localInputs, prevInputs, i, TX_Message, localStepSizes, localLastKeys);
         }
         #endif
+        
         uint64_t localStepSizesSum = std::reduce(localStepSizes,localStepSizes+12,0);
         prevInputs = localInputs;
 
         bool wavePressed = knobs[waveIdx].isPressed();
         bool octavePressed = knobs[octaveIdx].isPressed();
         bool volumePressed = knobs[volumeIdx].isPressed();
+
         xSemaphoreTake(sysState.mutex, portMAX_DELAY);
         sysState.inputs = localInputs;
         sysState.lastPressedKeys = localLastKeys;
@@ -457,7 +459,7 @@ void scanKeysTask(void * pvParameters) {
         if ((sysState.role == RECEIVER) && (localStepSizesSum != lastStepSizesSum || lastHoldValue != sysState.hold)) {
             for (int i = 0; i < 12; i++) {
                 if ( !(sysState.hold && sysState.heldKeys[i]) )
-                    __atomic_store_n(&currentStepSizes[i], localStepSizes[i], __ATOMIC_RELAXED);
+                    __atomic_store_n(&localStepSizesShared[i], localStepSizes[i], __ATOMIC_RELAXED);
             }
             lastStepSizesSum = localStepSizesSum;
             lastHoldValue = sysState.hold;
@@ -491,13 +493,19 @@ void decodeTask(void * pvParameters) {
       __atomic_store_n(&currentStepSize, localStepSize, __ATOMIC_RELAXED);
       #else
       if (localRole == RECEIVER) {
+          uint8_t key = localRX[2];
           int8_t senderOctave = localRX[1];
-          uint32_t localStepSize = (localRX[0] == 'P') ? stepSizes[localRX[2]] : 0;
-          int8_t shift = senderOctave - 4;
-          if (shift > 0) localStepSize <<= shift; 
-          else if (shift < 0) localStepSize >>= abs(shift);
 
-          __atomic_store_n(&currentStepSize, localStepSize, __ATOMIC_RELAXED);
+          uint32_t step = 0;
+          if (localRX[0] == 'P') {
+                step = stepSizes[key];
+              
+                int8_t shift = senderOctave - 4;
+                if (shift > 0) step <<= shift; 
+                else if (shift < 0) step >>= abs(shift);
+          }
+
+          __atomic_store_n(&remoteStepSizesShared[key], step, __ATOMIC_RELAXED);
 
           xSemaphoreTake(sysState.mutex, portMAX_DELAY);
           sysState.RX_Message = localRX;
@@ -592,22 +600,6 @@ void displayUpdateTask(void * pvParameters) {
 // ================= Setup Helpers ================= //
 // ================================================= //
 
-void wireWrites(uint8_t enableAddress, uint8_t writeVal) {
-    Wire.beginTransmission(EXPANDER_ADDR); 
-    Wire.write(enableAddress); 
-    Wire.write(writeVal); 
-    Wire.endTransmission();
-}
-
-void clearInterruptAndSync(uint8_t address, uint8_t writeVal) {
-
-    for (int i = 0; i < 4; i++) {
-        uint8_t bitA = 0b1;
-        uint8_t bitB = 0b1;
-        knobs[i].setInitialState(bitA, bitB); 
-    }  
-}
-
 void setPinDirections() {
     pinMode(RA0_PIN, OUTPUT);
     pinMode(RA1_PIN, OUTPUT);
@@ -624,8 +616,6 @@ void setPinDirections() {
     pinMode(C3_PIN, INPUT);
     pinMode(JOYX_PIN, INPUT);
     pinMode(JOYY_PIN, INPUT);
-
-    // pinMode(PA10, INPUT_PULLUP);
 }
 
 void initialiseDisplay() {
@@ -638,7 +628,7 @@ void initialiseDisplay() {
 }
 
 void initialiseCANBus() {
-    CAN_Init(false);
+    CAN_Init(true);
     setCANFilter(0x123,0x7ff);
 
     #ifndef DISABLE_ISRS
@@ -654,16 +644,32 @@ void initialiseCANBus() {
     CAN_TX_Semaphore = xSemaphoreCreateCounting(3,3);
 }
 
-void initialisePCAL6408A() {
+void initialiseKnobs() {
     sysState.mutex = xSemaphoreCreateMutex();
     
     for (int i = 0; i < 4; i++) {
         knobs[i].begin();
     }
-    clearInterruptAndSync(EXPANDER_ADDR, 0x00); 
-    
-    #ifndef DISABLE_ISRS
-    #endif
+    for (int i = 3; i < 5; i++) {
+        setRow(i);
+        delayMicroseconds(3);
+        std::bitset<4> cols = readCols();
+        
+        #ifdef V1
+        uint8_t knobIndex = (i == 3) ? 3 : 1;
+        knobs[knobIndex].setInitialState(cols[0],cols[1]);
+        knobs[knobIndex-1].setInitialState(cols[2],cols[3]);
+        #elifdef V2
+        if (i == 3) {
+            knobs[3].setInitialState(cols[0], cols[1]);
+            knobs[0].setInitialState(cols[2], cols[3]);
+        }
+        if (i == 4) {
+            knobs[2].setInitialState(cols[0], cols[1]);
+            knobs[1].setInitialState(cols[2], cols[3]);
+        }
+        #endif
+    }
 }
 
 void initialiseHardwareTimer() {
@@ -689,6 +695,13 @@ void initialiseThreads() {
     #endif
 }
 
+void initialiseAtomicVariables() {
+    for (int i = 0; i < 12; i++) {
+        __atomic_store_n(&localStepSizesShared[i], 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&remoteStepSizesShared[i], 0, __ATOMIC_RELAXED);
+    }
+}
+
 // ================================================= //
 // ===================== Setup ===================== //
 // ================================================= //
@@ -710,10 +723,10 @@ void setup() {
   initialiseCANBus();
 
   //Initialise PCAL6408A (using i2cMutex)
-  initialisePCAL6408A();
+  initialiseKnobs();
 
   // Initialize the atomic variables before the timer starts
-  __atomic_store_n(&currentStepSize, 0, __ATOMIC_RELAXED);
+  initialiseAtomicVariables();
 
   // Initialise hardware timer
   initialiseHardwareTimer();
