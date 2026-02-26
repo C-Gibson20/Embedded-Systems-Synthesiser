@@ -375,6 +375,7 @@ void processAudioCommands() {
                 break;
             }
         }
+        updateDisplayState();
     }
 }
 
@@ -906,7 +907,6 @@ void displayUpdateTask(void * pvParameters) {
       for (int i = 0; i < 12; i++) {
           if (displayState.activeNotes & (1 << i)) {
               u8g2.print(noteNames[i]);
-              u8g2.print(" ");
           }
       }
       
