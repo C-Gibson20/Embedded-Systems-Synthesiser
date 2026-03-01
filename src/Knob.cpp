@@ -27,9 +27,8 @@ void Knob::updateRotation(uint8_t currA, uint8_t currB) {
 
     if (currState != prevState) {
         // "Impossible" transition logic
-        if ((currState ^ prevState) == 0b11) {
-            change = lastDirection;
-        }
+        if ((currState ^ prevState) == 0b11) change = lastDirection;
+        
         // Normal transitions
         else if ((prevState == 0b00 && currState == 0b01) || (prevState == 0b11 && currState == 0b10)) {
             change = 1; 
@@ -43,36 +42,26 @@ void Knob::updateRotation(uint8_t currA, uint8_t currB) {
 
         if (change != 0) {
             int8_t current = __atomic_load_n(&atomicRotation, __ATOMIC_RELAXED);
-
             int8_t newValue = current + change;
 
             if (newValue > upperLimit) newValue = upperLimit;
             if (newValue < lowerLimit) newValue = lowerLimit;
 
             __atomic_store_n(&atomicRotation, newValue, __ATOMIC_RELAXED);
-
-            rotation = newValue;
         }
     }
 }
 
 void Knob::updateSwitch(bool bitS) {
     bool pressed = (bitS == 0);
-    if (pressed && !buttonWasPressed) {
-        buttonChanged = true;
-    }
+    if (pressed && !buttonWasPressed) __atomic_store_n(&buttonChanged, true, __ATOMIC_RELEASE);
     buttonWasPressed = pressed;
 }
 
 bool Knob::isPressed() {
-    if (buttonChanged) {
-        buttonChanged = false;
-        return true;
-    }
-    return false;
+    return __atomic_exchange_n(&buttonChanged, false, __ATOMIC_ACQ_REL);
 }
 
-// Reading 
 int8_t Knob::getValue() {
     return __atomic_load_n(&atomicRotation, __ATOMIC_RELAXED);
 }

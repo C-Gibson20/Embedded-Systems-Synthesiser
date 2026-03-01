@@ -502,6 +502,9 @@ void CAN_TX_ISR (void) {
 // ================================================= //
 
 void pushAudioCommand(const AudioCommand &audioCmd) {
+    // Enter critical section: No other task or ISR can interrupt this block
+    taskENTER_CRITICAL();
+
     uint8_t nextWriteIdx = (audioCommandWriteIdx + 1) % AUDIO_COMMAND_QUEUE_LENGTH;
     
     if (nextWriteIdx != audioCommandReadIdx) {
@@ -509,6 +512,9 @@ void pushAudioCommand(const AudioCommand &audioCmd) {
         __DMB();  // Ensure command is fully written before updating index
         audioCommandWriteIdx = nextWriteIdx;
     }
+
+    // Exit critical section: Normal scheduling resumes
+    taskEXIT_CRITICAL();
 }
 
 void pushRoleChangeCommand(SynthRole newRole) {
