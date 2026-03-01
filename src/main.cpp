@@ -186,6 +186,7 @@ struct GlobalParameters {
     volatile SynthWaveform waveform;
     volatile uint8_t octave;
     volatile int32_t pitch;
+    volatile bool hasChanged;
 };
 
 struct AudioCommand {
@@ -397,12 +398,57 @@ void processAudioCommands() {
     }
 }
 
+void handleWaveforms(SynthWaveform waveform, uint8_t index, uint32_t &uncenteredValue) {
+    switch (waveform) {
+        case SQUARE:
+            uncenteredValue = (index < 128) ? 255 : 0;
+            break;
+        case SAW:
+            uncenteredValue = index;
+            break;
+        case TRIANGLE:
+            uncenteredValue = (index < 128) ? (index << 1) : (511 - (index << 1));
+            break;
+        case SINE:
+            uncenteredValue = sineTable[index];
+            break;
+        case SUPERSAW: {
+            uint8_t saw1 = index;
+            uint8_t saw2 = (index + (index >> 2)) & 0xFF; 
+            uncenteredValue = (saw1 + saw2) >> 1;
+            break;
+        }
+        case SINEFOLD: {
+            int16_t val = (sineTable[index] - 128) * 2; 
+            if (val > 127) val = 255 - val;             
+            if (val < -128) val = -255 - val;           
+            uncenteredValue = val + 128;
+            break;
+        }
+    }
+}
+
 // ================================================= //
 // ============= Interrupt Subroutines ============= //
 // ================================================= //
 
 void sampleISR() {
     processAudioCommands();
+
+    if (globalParams.hasChanged) {
+        globalParams.hasChanged = false;
+        for (int i = 0; i < MAX_SOUNDS; i++) {
+            if (sounds[i].active && !sounds[i].held && !sounds[i].remote) {
+                sounds[i].volume = globalParams.volume;
+                sounds[i].waveform = globalParams.waveform;
+                sounds[i].pitch = globalParams.pitch;   
+
+                uint32_t baseStep = computeStep(sounds[i].key, globalParams.octave);
+                int32_t offset = (baseStep * (globalParams.pitch >> 2)) >> 6;
+                sounds[i].effectiveStep = baseStep + offset;
+            }
+        }
+    }
 
     int32_t mixedVout = 0;
     uint8_t activeNotes = 0;
@@ -411,49 +457,11 @@ void sampleISR() {
 
         if(!sounds[i].active) continue;
 
-        if (!sounds[i].held && !sounds[i].remote) {
-            sounds[i].volume = globalParams.volume;
-            sounds[i].waveform = globalParams.waveform;
-            sounds[i].pitch = globalParams.pitch;
-
-            // Recalculate step based on global octave
-            uint32_t baseStep = computeStep(sounds[i].key, globalParams.octave);
-            int32_t offset = (baseStep * (sounds[i].pitch >> 2)) >> 6;
-            sounds[i].effectiveStep = baseStep + offset;
-        }
-
         sounds[i].phase += sounds[i].effectiveStep;
         
         uint8_t index = sounds[i].phase >> 24;
         uint32_t uncenteredValue = 0;
-
-        switch (sounds[i].waveform) {
-            case SQUARE:
-                uncenteredValue = (index < 128) ? 255 : 0;
-                break;
-            case SAW:
-                uncenteredValue = index;
-                break;
-            case TRIANGLE:
-                uncenteredValue = (index < 128) ? (index << 1) : (511 - (index << 1));
-                break;
-            case SINE:
-                uncenteredValue = sineTable[index];
-                break;
-            case SUPERSAW: {
-                uint8_t saw1 = index;
-                uint8_t saw2 = (index + (index >> 2)) & 0xFF; 
-                uncenteredValue = (saw1 + saw2) >> 1;
-                break;
-            }
-            case SINEFOLD: {
-                int16_t val = (sineTable[index] - 128) * 2; 
-                if (val > 127) val = 255 - val;             
-                if (val < -128) val = -255 - val;           
-                uncenteredValue = val + 128;
-                break;
-            }
-        }
+        handleWaveforms(sounds[i].waveform, index, uncenteredValue);
 
         int32_t noteVout = (int32_t)(uncenteredValue) - 128;
         noteVout >>= (8 - sounds[i].volume); // Apply volume control
@@ -714,6 +722,22 @@ bool displayStateChanged(const DisplayState &lastState, const DisplayState &curr
     return memcmp(lastMsg.data(), currentMsg.data(), 8) != 0;
 }
 
+void updateGlobalParams(uint32_t &lastPitch, uint8_t &lastVolume, uint8_t &lastWaveform, uint8_t &lastOctave, uint32_t pitch, uint8_t volume, uint8_t waveform, uint8_t octave) {
+    lastPitch = pitch;
+    lastVolume = volume;
+    lastWaveform = waveform;
+    lastOctave = octave;
+
+    globalParams.pitch = pitch;
+    globalParams.volume = volume;
+    globalParams.waveform = (SynthWaveform)waveform;    
+    globalParams.octave = octave;
+
+    __DMB(); // Ensure all parameter updates are visible before setting hasChanged
+
+    globalParams.hasChanged = true;
+}
+
 // ================================================= //
 // ===================== Tasks ===================== //
 // ================================================= //
@@ -724,10 +748,10 @@ void scanKeysTask(void * pvParameters) {
 
     static std::bitset<32> prevInputs;
     static std::array<uint8_t, 8> TX_Message = {0};
-    static uint8_t lastPitch;
+    static uint32_t lastPitch;
     static uint8_t lastVolume;
     static uint8_t lastWaveform;
-    static int8_t lastOctave;
+    static uint8_t lastOctave;
     static bool westConnected = false;
     static bool eastConnected = false;
 
@@ -784,27 +808,12 @@ void scanKeysTask(void * pvParameters) {
                     }
                 }
 
-                uint8_t pitch = knobs[pitchIdx].getValue();
+                uint32_t pitch = knobs[pitchIdx].getValue();
                 uint8_t volume = knobs[volumeIdx].getValue();
                 uint8_t waveform = knobs[waveIdx].getValue();
                 uint8_t octave = knobs[octaveIdx].getValue();
 
-                if (pitch != lastPitch) {
-                    globalParams.pitch = pitch;
-                    lastPitch = pitch;
-                }
-                if (volume != lastVolume) {
-                    globalParams.volume = volume;
-                    lastVolume = volume;
-                }
-                if (waveform != lastWaveform) {
-                    globalParams.waveform = (SynthWaveform)waveform;
-                    lastWaveform = waveform;
-                }
-                if (octave != lastOctave) {
-                    globalParams.octave = octave;
-                    lastOctave = octave;
-                }
+                if (pitch != lastPitch || volume != lastVolume || waveform != lastWaveform || octave != lastOctave) updateGlobalParams(lastPitch, lastVolume, lastWaveform, lastOctave, pitch, volume, waveform, octave);
             #endif
         
             prevInputs = localInputs;
