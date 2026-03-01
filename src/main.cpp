@@ -8,7 +8,7 @@
 #include "Knob.h"
 #include "sine_lut.h"
 
-/* --- PROFILING SYSTEM --- */
+// --- PROFILING SYSTEM ---
 // #define PROFILING_MODE  
 // #define V1
 
@@ -28,7 +28,55 @@
     // #define PROFILE_CAN_TX_ISR
     // #define PROFILE_KNOB_ISR
 #endif
-/* --------------------------- */
+// --------------------------- 
+
+// ================================================= //
+// --- DIRECT PORT MANIPULATION MACROS (STM32L432KC) //
+// ================================================= //
+#if defined(ARDUINO_ARCH_STM32)
+    // A5 = PA6 (REN_PIN)  <-- FIXED!
+    #define REN_HIGH()  (GPIOA->BSRR = (1 << 6))
+    #define REN_LOW()   (GPIOA->BSRR = (1 << (6 + 16)))
+
+    // D3 = PB0 (RA0_PIN)
+    #define RA0_HIGH()  (GPIOB->BSRR = (1 << 0))
+    #define RA0_LOW()   (GPIOB->BSRR = (1 << (0 + 16)))
+
+    // D6 = PB1 (RA1_PIN)
+    #define RA1_HIGH()  (GPIOB->BSRR = (1 << 1))
+    #define RA1_LOW()   (GPIOB->BSRR = (1 << (1 + 16)))
+
+    // D12 = PB4 (RA2_PIN)
+    #define RA2_HIGH()  (GPIOB->BSRR = (1 << 4))
+    #define RA2_LOW()   (GPIOB->BSRR = (1 << (4 + 16)))
+
+    // D11 = PB5 (OUT_PIN)
+    #define OUT_HIGH()  (GPIOB->BSRR = (1 << 5))
+    #define OUT_LOW()   (GPIOB->BSRR = (1 << (5 + 16)))
+
+    // --- INPUT MASKS (All mapped to Port A) ---
+    // A2 = PA3 (C0_PIN)   <-- FIXED!
+    #define C0_MASK (1 << 3)
+    // D9 = PA8 (C1_PIN)
+    #define C1_MASK (1 << 8)
+    // A6 = PA7 (C2_PIN)   <-- FIXED!
+    #define C2_MASK (1 << 7)
+    // D1 = PA9 (C3_PIN)
+    #define C3_MASK (1 << 9)
+#else
+    // Fallback if compiled for a different board
+    #define REN_HIGH()  (digitalWrite(REN_PIN, HIGH))
+    #define REN_LOW()   (digitalWrite(REN_PIN, LOW))
+    #define RA0_HIGH()  (digitalWrite(RA0_PIN, HIGH))
+    #define RA0_LOW()   (digitalWrite(RA0_PIN, LOW))
+    #define RA1_HIGH()  (digitalWrite(RA1_PIN, HIGH))
+    #define RA1_LOW()   (digitalWrite(RA1_PIN, LOW))
+    #define RA2_HIGH()  (digitalWrite(RA2_PIN, HIGH))
+    #define RA2_LOW()   (digitalWrite(RA2_PIN, LOW))
+    #define OUT_HIGH()  (digitalWrite(OUT_PIN, HIGH))
+    #define OUT_LOW()   (digitalWrite(OUT_PIN, LOW))
+#endif
+// -----------------------------------------------------
 
 //Constants
 const uint32_t displayInterval = 100; 
@@ -118,7 +166,7 @@ QueueHandle_t msgOutQ;
 
 //Sound Handling
 const int MAX_SOUNDS = 16;
-enum AudioCommandType {NOTE_ON, NOTE_OFF, HOLD_ON, HOLD_OFF, ROLE_CHANGE, SOUND_UPDATE};
+enum AudioCommandType {NOTE_ON, NOTE_OFF, HOLD_ON, HOLD_OFF, ROLE_CHANGE}; //, SOUND_UPDATE};
 
 struct Sound {
     uint32_t step;
@@ -131,6 +179,13 @@ struct Sound {
     bool active;
     bool held;
     bool remote; // Indicates if the sound was triggered by a remote message
+};
+
+struct GlobalParameters {
+    volatile uint8_t volume;
+    volatile SynthWaveform waveform;
+    volatile uint8_t octave;
+    volatile int32_t pitch;
 };
 
 struct AudioCommand {
@@ -152,6 +207,7 @@ struct AudioCommand {
 volatile Sound sounds[MAX_SOUNDS];
 volatile uint8_t freeSounds[MAX_SOUNDS];    
 volatile uint8_t freeTop = 0;
+volatile GlobalParameters globalParams;
 
 constexpr int AUDIO_COMMAND_QUEUE_LENGTH = 32;
 AudioCommand audioCommandQueue[AUDIO_COMMAND_QUEUE_LENGTH];
@@ -199,44 +255,44 @@ HardwareTimer sampleTimer(TIM1);
 
 //Function to set outputs using key matrix
 void setOutMuxBit(const uint8_t bitIdx, const bool value) {
-    digitalWrite(REN_PIN,LOW);
-    digitalWrite(RA0_PIN, bitIdx & 0x01);
-    digitalWrite(RA1_PIN, bitIdx & 0x02);
-    digitalWrite(RA2_PIN, bitIdx & 0x04);
-    digitalWrite(OUT_PIN,value);
-    digitalWrite(REN_PIN,HIGH);
-    delayMicroseconds(2);
-    digitalWrite(REN_PIN,LOW);
+    REN_LOW();
+
+    if (bitIdx & 0x01) RA0_HIGH(); else RA0_LOW();
+    if (bitIdx & 0x02) RA1_HIGH(); else RA1_LOW();
+    if (bitIdx & 0x04) RA2_HIGH(); else RA2_LOW();
+
+    if (value) OUT_HIGH(); else OUT_LOW();
+
+    REN_HIGH();
+    delayMicroseconds(1);
+    REN_LOW();
 }
 
 // Function to read the inputs from the four columns of the switch matrix
 std::bitset<4> readCols() {
     std::bitset<4> result;
 
-    // Read the columns
-    result[0] = digitalRead(C0_PIN);
-    result[1] = digitalRead(C1_PIN);
-    result[2] = digitalRead(C2_PIN);
-    result[3] = digitalRead(C3_PIN);
+    uint32_t portAState = GPIOA->IDR; // Read entire Port A state
+    result[0] = (portAState & C0_MASK) != 0;
+    result[1] = (portAState & C1_MASK) != 0;
+    result[2] = (portAState & C2_MASK) != 0;
+    result[3] = (portAState & C3_MASK) != 0;
 
     return result;
 }
 
 void setRow(uint8_t rowIdx){
     // Set Row Select Enable low
-    digitalWrite(REN_PIN, LOW);
+    REN_LOW();
 
     // Set Row Select Address low
-    digitalWrite(RA0_PIN, rowIdx & 0x01);
-    digitalWrite(RA1_PIN, rowIdx & 0x02);
-    digitalWrite(RA2_PIN, rowIdx & 0x04);
-
-    // Latch for KNOB_MODE
-    // digitalWrite(OUT_PIN, (rowIdx == 2) ? LOW : HIGH);
+    if (rowIdx & 0x01) RA0_HIGH(); else RA0_LOW();
+    if (rowIdx & 0x02) RA1_HIGH(); else RA1_LOW();
+    if (rowIdx & 0x04) RA2_HIGH(); else RA2_LOW();
 
     // Set Row Select Enable High
-    digitalWrite(REN_PIN, HIGH);
-    delayMicroseconds(2);
+    REN_HIGH();
+    delayMicroseconds(1);
 }
 
 // ================================================= //
@@ -249,14 +305,6 @@ uint32_t computeStep(uint8_t key, uint8_t octave) {
     if (shift > 0) step <<= shift; 
     else if (shift < 0) step >>= abs(shift);
     return step;
-}
-
-void updateDisplayStateActiveNotes() {
-    uint16_t activeNotes = 0;
-    for (int i = 0; i < MAX_SOUNDS; i++) {
-        if (sounds[i].active) activeNotes |= (1 << sounds[i].key);
-    }
-    sysState.displayState.activeNotes = activeNotes;
 }
 
 int allocateSound() {
@@ -345,23 +393,7 @@ void processAudioCommands() {
 
                 break;
             }
-            case SOUND_UPDATE: {
-                for (int i = 0; i < MAX_SOUNDS; i++) {
-                    if (!sounds[i].active || sounds[i].held) continue;
-                    if (cmd.updateVolume) sounds[i].volume = cmd.volume;
-                    if (cmd.updateWave) sounds[i].waveform = cmd.waveform;
-
-                    if (cmd.updateOctave || cmd.updatePitch) {
-                        if (cmd.updatePitch) sounds[i].pitch = cmd.pitch;
-                        uint32_t step = computeStep(sounds[i].key, (cmd.updateOctave ? cmd.octaveValue : knobs[octaveIdx].getValue()));
-                        int32_t offset = (step * (sounds[i].pitch >> 2)) >> 6;
-                        sounds[i].effectiveStep = step + offset;
-                    }
-                }
-                break;
-            }
         }
-        updateDisplayStateActiveNotes();
     }
 }
 
@@ -378,6 +410,17 @@ void sampleISR() {
     for (int i = 0; i < MAX_SOUNDS; i++) {
 
         if(!sounds[i].active) continue;
+
+        if (!sounds[i].held && !sounds[i].remote) {
+            sounds[i].volume = globalParams.volume;
+            sounds[i].waveform = globalParams.waveform;
+            sounds[i].pitch = globalParams.pitch;
+
+            // Recalculate step based on global octave
+            uint32_t baseStep = computeStep(sounds[i].key, globalParams.octave);
+            int32_t offset = (baseStep * (sounds[i].pitch >> 2)) >> 6;
+            sounds[i].effectiveStep = baseStep + offset;
+        }
 
         sounds[i].phase += sounds[i].effectiveStep;
         
@@ -501,42 +544,36 @@ void pushNoteOffCommand(uint8_t key, bool remote) {
     pushAudioCommand(cmd);
 }
 
-void pushSoundUpdateCommand(int32_t pitch, uint8_t volume, int waveform, uint8_t octave, int32_t lastPitch, uint8_t lastVolume, int lastWaveform, int8_t lastOctave) {
-    AudioCommand cmd;
-    cmd.type = SOUND_UPDATE;
-    cmd.updatePitch  = (pitch != lastPitch);
-    cmd.updateVolume = (volume != lastVolume);
-    cmd.updateWave   = (waveform != lastWaveform);
-    cmd.updateOctave = (octave != lastOctave);
-    cmd.pitch  = pitch;
-    cmd.volume = volume;
-    cmd.waveform = (SynthWaveform)waveform;
-    cmd.octaveValue = octave;
-    pushAudioCommand(cmd);
-}
-
 void handleSynthRole(bool westConnected, bool eastConnected, bool pitchPressed) {
+    xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+    SynthRole role = sysState.role;
+    xSemaphoreGive(sysState.mutex);
+
     static SynthRole lastRole = SINGLE;
     static bool overwrittenAutoConfig = false;
 
     // Disconnected defaults to single mode and resets auto-config override
     if (!westConnected && !eastConnected) {
-        sysState.role = SINGLE;
+        role = SINGLE;
         overwrittenAutoConfig = false;
     }
     
     // Manual override if connected to at least one other device
     else if (pitchPressed) {
         overwrittenAutoConfig = true;
-        sysState.role = (sysState.role == SENDER) ? RECEIVER : SENDER;
+        role = (role == SENDER) ? RECEIVER : SENDER;
     }
 
     // If auto-configuration has not been overridden, determine role based on connections
-    else if (!overwrittenAutoConfig && !westConnected && eastConnected) sysState.role = SENDER;
-    else if (!overwrittenAutoConfig && westConnected) sysState.role = RECEIVER;
+    else if (!overwrittenAutoConfig && !westConnected && eastConnected) role = SENDER;
+    else if (!overwrittenAutoConfig && westConnected) role = RECEIVER;
 
-    if (sysState.role != lastRole) pushRoleChangeCommand(sysState.role);
-    lastRole = sysState.role;
+    if (role != lastRole) pushRoleChangeCommand(role);
+    lastRole = role;
+
+    xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+    sysState.role = role;
+    xSemaphoreGive(sysState.mutex);
 }
 
 void updateRotations(uint8_t rowIdx, std::bitset<4> cols, OctaveControlMode localOctaveMode) {
@@ -638,15 +675,38 @@ void constructAndSendTXMessage(std::bitset<32> &localInputs, std::bitset<32> &pr
 
 void updateDisplayState() {
     xSemaphoreTake(sysState.mutex, portMAX_DELAY);
-    uint8_t displayOctaveIdx = (sysState.octaveMode == OCTAVE_LOCAL) ? octaveIdx : octaveOffsetIdx;
+    OctaveControlMode octaveMode = sysState.octaveMode;
+    xSemaphoreGive(sysState.mutex);
+
+    uint8_t displayOctaveIdx = (octaveMode == OCTAVE_LOCAL) ? octaveIdx : octaveOffsetIdx;
+    uint16_t activeNotes = 0;
+    for (int i = 0; i < MAX_SOUNDS; i++) {
+        if (sounds[i].active) activeNotes |= (1 << sounds[i].key);
+    }
+
+    xSemaphoreTake(sysState.mutex, portMAX_DELAY);
     sysState.displayState.waveform = knobs[waveIdx].getValue();
     sysState.displayState.volume = knobs[volumeIdx].getValue();
     sysState.displayState.pitch = knobs[pitchIdx].getValue();
     sysState.displayState.octave = knobs[displayOctaveIdx].getValue();
     sysState.displayState.role = sysState.role;
-    sysState.displayState.octaveMode = sysState.octaveMode;
+    sysState.displayState.octaveMode = sysState.octaveMode;    
+    sysState.displayState.activeNotes = activeNotes;
     xSemaphoreGive(sysState.mutex);
 }  
+
+bool displayStateChanged(const DisplayState &lastState, const DisplayState &currentState, const std::array<uint8_t, 8> &lastMsg, const std::array<uint8_t, 8> &currentMsg) {
+    if (lastState.waveform != currentState.waveform ||
+        lastState.volume != currentState.volume ||
+        lastState.pitch != currentState.pitch ||
+        lastState.octave != currentState.octave ||
+        lastState.role != currentState.role ||
+        lastState.octaveMode != currentState.octaveMode ||
+        lastState.activeNotes != currentState.activeNotes) {
+        return true;
+    }
+    return memcmp(lastMsg.data(), currentMsg.data(), 8) != 0;
+}
 
 // ================================================= //
 // ===================== Tasks ===================== //
@@ -697,8 +757,8 @@ void scanKeysTask(void * pvParameters) {
             #else
         
                 handleSwitches(knobs[volumeIdx].isPressed(), knobs[waveIdx].isPressed(), knobs[octaveIdx].isPressed());
-                xSemaphoreTake(sysState.mutex, portMAX_DELAY);
                 handleSynthRole(westConnected, eastConnected, knobs[pitchIdx].isPressed());
+                xSemaphoreTake(sysState.mutex, portMAX_DELAY);
                 SynthRole localRole = sysState.role;
                 sysState.inputs = localInputs;    
                 xSemaphoreGive(sysState.mutex);
@@ -723,17 +783,25 @@ void scanKeysTask(void * pvParameters) {
                 uint8_t waveform = knobs[waveIdx].getValue();
                 uint8_t octave = knobs[octaveIdx].getValue();
 
-                if (pitch != lastPitch || volume != lastVolume || waveform != lastWaveform || octave != lastOctave) {
-                    pushSoundUpdateCommand(pitch, volume, waveform, octave, lastPitch, lastVolume, lastWaveform, lastOctave);
-                    lastPitch  = pitch;
+                if (pitch != lastPitch) {
+                    globalParams.pitch = pitch;
+                    lastPitch = pitch;
+                }
+                if (volume != lastVolume) {
+                    globalParams.volume = volume;
                     lastVolume = volume;
-                    lastWaveform   = waveform;
+                }
+                if (waveform != lastWaveform) {
+                    globalParams.waveform = (SynthWaveform)waveform;
+                    lastWaveform = waveform;
+                }
+                if (octave != lastOctave) {
+                    globalParams.octave = octave;
                     lastOctave = octave;
                 }
             #endif
         
             prevInputs = localInputs;
-            updateDisplayState();
 
     #ifndef DISABLE_THREADS
         }
@@ -797,10 +865,14 @@ void displayUpdateTask(void * pvParameters) {
     const TickType_t xFrequency = displayInterval/portTICK_PERIOD_MS;
     TickType_t xLastWakeTime = xTaskGetTickCount();
 
+    static std::array<uint8_t, 8> lastMsg = {0};
+    static DisplayState lastDisplayState = {};
+
     #ifndef DISABLE_THREADS
         while (1) { // Standard RTOS mode
             vTaskDelayUntil( &xLastWakeTime, xFrequency );
     #endif
+            updateDisplayState();
             xSemaphoreTake(sysState.mutex, portMAX_DELAY);
             std::array<uint8_t, 8> receivedMsg = sysState.RX_Message;
             std::array<uint8_t, 8> sentMsg = sysState.TX_Message;
@@ -808,6 +880,7 @@ void displayUpdateTask(void * pvParameters) {
             OctaveControlMode octaveMode = sysState.octaveMode;
             DisplayState displayState = sysState.displayState;
             xSemaphoreGive(sysState.mutex);
+            std::array<uint8_t, 8> msg = {0};
         
             //Update display
             u8g2.clearBuffer();                 
@@ -827,26 +900,26 @@ void displayUpdateTask(void * pvParameters) {
                 for (int i = 0; i < 12; i++) {
                     if (displayState.activeNotes & (1 << i)) u8g2.print(noteNames[i]);
                 }
-            
+                
                 u8g2.setCursor(2, 20);
                 u8g2.print("P: "); 
                 u8g2.print(displayState.pitch);
-
+                
                 u8g2.print(", W: ");
                 u8g2.print(waveNames[displayState.waveform]);
-
+                
                 u8g2.print((octaveMode == OCTAVE_OFFSET) ? ", O+:" : ", O:");
                 u8g2.print(displayState.octave);
-
+                
                 u8g2.print(", V: "); 
                 u8g2.print(displayState.volume);
-
+                
                 u8g2.setCursor(2, 30);
                 u8g2.print("R:");
                 u8g2.print(displayState.role == SENDER ? "S" : displayState.role == RECEIVER ? "R" : "1");
-
+                
                 if (role != SINGLE) {
-                    std::array<uint8_t, 8> msg = (role == SENDER) ? sentMsg : receivedMsg;
+                    msg = (role == SENDER) ? sentMsg : receivedMsg;
                     u8g2.print(", ");
                     u8g2.print((char)msg[0]);
                     u8g2.print(msg[1]);
@@ -855,8 +928,13 @@ void displayUpdateTask(void * pvParameters) {
                     u8g2.print(msg[4]);
                     u8g2.print(msg[5]);
                 }
+
             #endif
-            u8g2.sendBuffer();
+
+            if (displayStateChanged(lastDisplayState, displayState, lastMsg, msg)) u8g2.sendBuffer();
+
+            lastDisplayState = displayState;
+            lastMsg = msg;
 
             //Toggle LED
             digitalToggle(LED_BUILTIN);
@@ -959,10 +1037,10 @@ void initialiseThreads() {
         TaskHandle_t decodeHandle = NULL;
         TaskHandle_t displayUpdateHandle = NULL;
         TaskHandle_t canTxHandle = NULL;
-        xTaskCreate(scanKeysTask, "scanKeys", 256, NULL, 4, &scanKeysHandle);
+        xTaskCreate(scanKeysTask, "scanKeys", 256, NULL, 3, &scanKeysHandle);
         xTaskCreate(displayUpdateTask, "displayUpdate", 256, NULL, 1, &displayUpdateHandle);
         xTaskCreate(decodeTask, "decode", 256, NULL, 2, &decodeHandle);
-        xTaskCreate(CAN_TX_Task, "canTX", 128, NULL, 2, &canTxHandle);
+        xTaskCreate(CAN_TX_Task, "canTX", 128, NULL, 4, &canTxHandle);
     #endif
 }
 
