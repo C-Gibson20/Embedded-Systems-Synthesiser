@@ -16,7 +16,7 @@
 #define V2
 
 #ifdef V2
-    // #define I2C_EXPANDER_KNOBS
+    #define I2C_EXPANDER_KNOBS
 #endif 
 
 #ifdef I2C_EXPANDER_KNOBS
@@ -476,35 +476,44 @@ void processAudioCommands() {
     }
 }
 
-void handleWaveforms(SynthWaveform waveform, uint8_t index, uint32_t &uncenteredValue) {
-    switch (waveform) {
-        case SQUARE:
-            uncenteredValue = (index < 128) ? 255 : 0;
-            break;
-        case SAW:
-            uncenteredValue = index;
-            break;
-        case TRIANGLE:
-            uncenteredValue = (index < 128) ? (index << 1) : (511 - (index << 1));
-            break;
-        case SINE:
-            uncenteredValue = sineTable[index];
-            break;
-        case SUPERSAW: {
-            uint8_t saw1 = index;
-            uint8_t saw2 = (index + (index >> 2)) & 0xFF; 
-            uncenteredValue = (saw1 + saw2) >> 1;
-            break;
-        }
-        case SINEFOLD: {
-            int16_t val = (sineTable[index] - 128) * 2; 
-            if (val > 127) val = 255 - val;             
-            if (val < -128) val = -255 - val;           
-            uncenteredValue = val + 128;
-            break;
-        }
-    }
+uint32_t funcSquare(uint8_t i) { 
+    return (i < 128) ? 255 : 0; 
 }
+
+uint32_t funcSaw(uint8_t i) { 
+    return i; 
+}
+
+uint32_t funcTri(uint8_t i) { 
+    return (i < 128) ? (i << 1) : (511 - (i << 1)); 
+}
+
+uint32_t funcSine(uint8_t i) { 
+    return sineTable[i]; 
+}
+
+uint32_t funcSuperSaw(uint8_t index) {
+    uint8_t saw1 = index;
+    uint8_t saw2 = (index + (index >> 2)) & 0xFF; 
+    return (saw1 + saw2) >> 1;
+}
+
+uint32_t funcSineFold(uint8_t index) {
+    int16_t val = (sineTable[index] - 128) * 2; 
+    if (val > 127) val = 255 - val;             
+    if (val < -128) val = -255 - val;           
+    return val + 128;
+}
+
+typedef uint32_t (*WaveformFunc)(uint8_t index);
+const WaveformFunc waveTable[] = {
+    funcSquare,   // 0: SQUARE
+    funcSaw,      // 1: SAW
+    funcTri,      // 2: TRIANGLE
+    funcSine,     // 3: SINE
+    funcSuperSaw, // 4: SUPERSAW
+    funcSineFold  // 5: SINEFOLD
+};
 
 // ================================================= //
 // ============= Interrupt Subroutines ============= //
@@ -547,14 +556,15 @@ void sampleISR() {
     uint8_t activeNotes = 0;
     
     for (int i = 0; i < MAX_SOUNDS; i++) {
-
         if(!sounds[i].active) continue;
 
         sounds[i].phase += sounds[i].effectiveStep;
-        
         uint8_t index = sounds[i].phase >> 24;
-        uint32_t uncenteredValue = 0;
-        handleWaveforms(sounds[i].waveform, index, uncenteredValue);
+
+        uint8_t waveIdx = (uint8_t)sounds[i].waveform;
+        if (waveIdx > 5) waveIdx = 0;
+
+        uint32_t uncenteredValue = waveTable[waveIdx](index);
 
         int32_t noteVout = (int32_t)(uncenteredValue) - 128;
         noteVout >>= (8 - sounds[i].volume); // Apply volume control
@@ -562,15 +572,9 @@ void sampleISR() {
         activeNotes++;
     }
 
-    static const uint16_t invGain[] = {
-        0,
-        256/1, 256/2, 256/3, 256/4,
-        256/5, 256/6, 256/7, 256/8,
-        256/9, 256/10, 256/11, 256/12,
-        256/13, 256/14, 256/15, 256/16
-    };
+    static const uint16_t invGain[] = {0, 256/1, 256/2, 256/3, 256/4, 256/5, 256/6, 256/7, 256/8, 256/9, 256/10, 256/11, 256/12, 256/13, 256/14, 256/15, 256/16};
 
-    if (activeNotes > 0) {
+    if (activeNotes > 1) {
         mixedVout = (mixedVout * invGain[activeNotes]) >> 8;
     }
 
@@ -653,38 +657,30 @@ void pushNoteOffCommand(uint8_t key, bool remote) {
     pushAudioCommand(cmd);
 }
 
-void handleSynthRole(bool westConnected, bool eastConnected, bool pitchPressed) {
-    xSemaphoreTake(sysState.mutex, portMAX_DELAY);
-    SynthRole role = sysState.role;
-    xSemaphoreGive(sysState.mutex);
-
+void handleSynthRole(SynthRole &localRole, bool westConnected, bool eastConnected, bool pitchPressed) {
     static SynthRole lastRole = SINGLE;
     static bool overwrittenAutoConfig = false;
 
     // Disconnected defaults to single mode and resets auto-config override
     if (!westConnected && !eastConnected) {
-        role = SINGLE;
+        localRole = SINGLE;
         overwrittenAutoConfig = false;
     }
     
     // Manual override if connected to at least one other device
     else if (pitchPressed) {
         overwrittenAutoConfig = true;
-        role = (role == SENDER) ? RECEIVER : SENDER;
+        localRole = (localRole == SENDER) ? RECEIVER : SENDER;
     }
 
     // If auto-configuration has not been overridden, determine role based on connections
-    else if (!overwrittenAutoConfig && !westConnected && eastConnected) role = SENDER;
-    else if (!overwrittenAutoConfig && westConnected) role = RECEIVER;
+    else if (!overwrittenAutoConfig && !westConnected && eastConnected) localRole = SENDER;
+    else if (!overwrittenAutoConfig && westConnected) localRole = RECEIVER;
 
     // role = RECEIVER; // Force receiver for testing
 
-    if (role != lastRole) pushRoleChangeCommand(role);
-    lastRole = role;
-
-    xSemaphoreTake(sysState.mutex, portMAX_DELAY);
-    sysState.role = role;
-    xSemaphoreGive(sysState.mutex);
+    if (localRole != lastRole) pushRoleChangeCommand(localRole);
+    lastRole = localRole;
 }
 
 void updateRotations(uint8_t rowIdx, std::bitset<4> cols, OctaveControlMode localOctaveMode) {
@@ -941,6 +937,7 @@ void scanKeysTask(void * pvParameters) {
 
             xSemaphoreTake(sysState.mutex, portMAX_DELAY);
             OctaveControlMode localOctaveMode = sysState.octaveMode;
+            SynthRole localRole = sysState.role;
             xSemaphoreGive(sysState.mutex);
 
             // Key scanning loop for Rows 0-2
@@ -980,11 +977,7 @@ void scanKeysTask(void * pvParameters) {
             #else
         
                 handleSwitches(knobs[volumeIdx].isPressed(), knobs[waveIdx].isPressed(), knobs[octaveIdx].isPressed());
-                handleSynthRole(westConnected, eastConnected, knobs[pitchIdx].isPressed());
-                xSemaphoreTake(sysState.mutex, portMAX_DELAY);
-                SynthRole localRole = sysState.role;
-                sysState.inputs = localInputs;    
-                xSemaphoreGive(sysState.mutex);
+                handleSynthRole(localRole, westConnected, eastConnected, knobs[pitchIdx].isPressed());
 
                 bool isSender = (localRole == SENDER);
                 bool isSingle = (localRole == SINGLE);
@@ -1010,6 +1003,10 @@ void scanKeysTask(void * pvParameters) {
             #endif
         
             prevInputs = localInputs;
+            xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+            sysState.role = localRole;
+            sysState.inputs = localInputs;    
+            xSemaphoreGive(sysState.mutex);
 
     #ifndef DISABLE_THREADS
         }
@@ -1100,7 +1097,7 @@ void displayUpdateTask(void * pvParameters) {
 
             #ifdef PROFILE_DISPLAY
                 // WCET: Force the maximum number of pixels to render
-                u8g2.print("Notes: C C# D D# E F F# G G# A A# B"); // All 12 notes active
+                u8g2.print("Notes: CC#DD#EFF#GG#AA#B"); // All 12 notes active
                 u8g2.setCursor(2, 20);
                 u8g2.print("P: -128, W: SF, O+: 8, V: 8");         // Max character widths
                 u8g2.setCursor(2,30);
@@ -1229,7 +1226,7 @@ void initialiseDisplay() {
     #endif
 
     u8g2.begin();
-    Wire.setClock(400000); // Increase I2C clock speed for faster display updates
+    Wire.setClock(1000000); // Increase I2C clock speed for faster display updates
 
     setOutMuxBit(DEN_BIT, HIGH);  //Enable display power supply
 }
@@ -1322,7 +1319,13 @@ void initialiseThreads() {
 }
 
 void initSoundAllocator() {
-    for (uint8_t i = 0; i < MAX_SOUNDS; i++) freeSounds[i] = i;
+    for (uint8_t i = 0; i < MAX_SOUNDS; i++) {
+        freeSounds[i] = i;
+        sounds[i].active = false;
+        sounds[i].waveform = SQUARE;
+        sounds[i].volume = 0;
+        sounds[i].phase = 0;
+    }
     freeTop = MAX_SOUNDS;
 }
 
