@@ -295,6 +295,35 @@ QueueHandle_t msgOutQ;
         Wire.endTransmission();
     }
 
+    extern "C" uint8_t u8x8_byte_rtos_hw_i2c(u8x8_t *u8x8, uint8_t msg, uint8_t arg_init, void *arg_ptr) {
+        uint8_t *data;
+        switch (msg) {
+            case U8X8_MSG_BYTE_SEND:
+                data = (uint8_t *)arg_ptr;
+                while (arg_init > 0) {
+                    Wire.write((uint8_t)*data);
+                    data++;
+                    arg_init--;
+                }
+                break;
+            case U8X8_MSG_BYTE_INIT:
+                // Wire.begin() already initialised in setup
+                break;
+            case U8X8_MSG_BYTE_SET_DC:
+                // Not used for I2C display
+                break;
+            case U8X8_MSG_BYTE_START_TRANSFER:
+                xSemaphoreTake(i2cMutex, portMAX_DELAY);
+                Wire.beginTransmission(u8x8_GetI2CAddress(u8x8) >> 1);
+                break;
+            case U8X8_MSG_BYTE_END_TRANSFER:
+                Wire.endTransmission();
+                xSemaphoreGive(i2cMutex);
+                break;
+        }
+        return 1;
+    }
+
 #endif
 
 //Function to set outputs using key matrix
@@ -645,7 +674,7 @@ void handleSynthRole(bool westConnected, bool eastConnected, bool pitchPressed) 
     else if (!overwrittenAutoConfig && !westConnected && eastConnected) role = SENDER;
     else if (!overwrittenAutoConfig && westConnected) role = RECEIVER;
 
-    role = RECEIVER; // Force receiver for testing
+    // role = RECEIVER; // Force receiver for testing
 
     if (role != lastRole) pushRoleChangeCommand(role);
     lastRole = role;
@@ -1084,15 +1113,7 @@ void displayUpdateTask(void * pvParameters) {
             #endif
 
             if (displayStateChanged(lastDisplayState, displayState, lastMsg, msg)) {
-                #ifdef I2C_EXPANDER_KNOBS
-                    xSemaphoreTake(i2cMutex, portMAX_DELAY);
-                #endif
-
                 u8g2.sendBuffer();
-            
-                #ifdef I2C_EXPANDER_KNOBS
-                    xSemaphoreGive(i2cMutex);
-                #endif
             }
 
             lastDisplayState = displayState;
@@ -1170,13 +1191,15 @@ void initialiseDisplay() {
     setOutMuxBit(DRST_BIT, LOW);  //Assert display logic reset
     delayMicroseconds(2);
     setOutMuxBit(DRST_BIT, HIGH);  //Release display logic reset
-    u8g2.begin();
-    setOutMuxBit(DEN_BIT, HIGH);  //Enable display power supply
+
     #ifdef I2C_EXPANDER_KNOBS
-        setOutMuxBit(KNOB_MODE, LOW);  //Do not read knobs through key matrix
-    #else 
-        setOutMuxBit(KNOB_MODE, HIGH);  //Do read knobs through key matrix
+        u8g2.getU8x8()->byte_cb = u8x8_byte_rtos_hw_i2c;
     #endif
+
+    u8g2.begin();
+    Wire.setClock(400000); // Increase I2C clock speed for faster display updates
+
+    setOutMuxBit(DEN_BIT, HIGH);  //Enable display power supply
 }
 
 void initialiseCANBus() {
@@ -1197,6 +1220,12 @@ void initialiseCANBus() {
 }
 
 void initialiseKnobs() {
+    #ifdef I2C_EXPANDER_KNOBS
+        setOutMuxBit(KNOB_MODE, LOW);  //Do not read knobs through key matrix
+    #else 
+        setOutMuxBit(KNOB_MODE, HIGH);  //Do read knobs through key matrix
+    #endif
+
     sysState.mutex = xSemaphoreCreateMutex();
     
     for (int i = 0; i < 5; i++) knobs[i].begin();
