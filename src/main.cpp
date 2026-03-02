@@ -16,7 +16,7 @@
 #define V2
 
 #ifdef V2
-    #define I2C_EXPANDER_KNOBS
+    // #define I2C_EXPANDER_KNOBS
 #endif 
 
 #ifdef I2C_EXPANDER_KNOBS
@@ -29,24 +29,24 @@
 // =================== Profiling =================== //
 // ================================================= //
 
-// #define PROFILING_MODE  
+#define PROFILING_MODE  
 #ifdef PROFILING_MODE
     #define DISABLE_THREADS
     #define DISABLE_ISRS
   
-    // #define PROFILE_SCANKEYS
-    // #define PROFILE_DISPLAY
-    // #define PROFILE_DECODE
-    // #define PROFILE_CAN_TX
+    #define PROFILE_SCANKEYS
+    #define PROFILE_DISPLAY
+    #define PROFILE_DECODE
+    #define PROFILE_CAN_TX
 
-    // #define PROFILE_SAMPLE_ISR
-    // #define PROFILE_CAN_RX_ISR
-    // #define PROFILE_CAN_TX_ISR
+    #define PROFILE_SAMPLE_ISR
+    #define PROFILE_CAN_RX_ISR
+    #define PROFILE_CAN_TX_ISR
 
-    // #ifdef I2C_EXPANDER_KNOBS
-        // #define PROFILE_KNOB
-        // #define PROFILE_KNOB_ISR
-    // #endif
+    #ifdef I2C_EXPANDER_KNOBS
+        #define PROFILE_KNOB
+        #define PROFILE_KNOB_ISR
+    #endif
 #endif
 
 // ================================================= //
@@ -514,8 +514,8 @@ void handleWaveforms(SynthWaveform waveform, uint8_t index, uint32_t &uncentered
 
     void knobISR() {
         #ifdef PROFILING_MODE
-            BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-            xSemaphoreGiveFromISR(knobSemaphore, &xHigherPriorityTaskWoken);
+            // Use standard API to prevent RTOS context crashes in main loop    
+            xSemaphoreGive(knobSemaphore);
         #else
             BaseType_t xHigherPriorityTaskWoken = pdFALSE;
             xSemaphoreGiveFromISR(knobSemaphore, &xHigherPriorityTaskWoken);
@@ -583,8 +583,8 @@ void CAN_RX_ISR (void) {
     #ifdef PROFILING_MODE
         RX_Message_ISR = {'P', 4, 1, 0, 0, 0, 0, 0}; 
         ID = 0x123;
-        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-        xQueueSendFromISR(msgInQ, RX_Message_ISR.data(), &xHigherPriorityTaskWoken);
+        // Use standard API to prevent RTOS context crashes in main loop
+        xQueueSend(msgInQ, RX_Message_ISR.data(), 0);
     #else
         CAN_RX(ID, RX_Message_ISR.data());
         xQueueSendFromISR(msgInQ, RX_Message_ISR.data(), NULL);
@@ -593,8 +593,8 @@ void CAN_RX_ISR (void) {
 
 void CAN_TX_ISR (void) {
 	#ifdef PROFILING_MODE
-        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-        xSemaphoreGiveFromISR(CAN_TX_Semaphore, &xHigherPriorityTaskWoken);
+        // Use standard API to prevent RTOS context crashes in main loop
+        xSemaphoreGive(CAN_TX_Semaphore);
     #else
         xSemaphoreGiveFromISR(CAN_TX_Semaphore, NULL);
     #endif
@@ -902,8 +902,10 @@ void updateGlobalParams(uint32_t &lastPitch, uint8_t &lastVolume, uint8_t &lastW
                     }
 
                     retryCount++;
-                    // Yield briefly to let other equal/higher priority tasks run if stuck
-                    vTaskDelay(pdMS_TO_TICKS(1)); 
+                    #ifndef PROFILE_KNOB
+                        // Yield briefly to let other equal/higher priority tasks run if stuck
+                        vTaskDelay(pdMS_TO_TICKS(1)); 
+                    #endif
                     
             #ifdef PROFILE_KNOB
                 // WCET: Force the worst-case 3 loop iterations
@@ -948,9 +950,7 @@ void scanKeysTask(void * pvParameters) {
                 delayMicroseconds(3);
                 std::bitset<4> cols = readCols();
 
-                #ifdef I2C_EXPANDER_KNOBS
-                    if (i == 3 || i == 4) continue;
-                #else 
+                #ifndef I2C_EXPANDER_KNOBS
                     updateRotations(i, cols, localOctaveMode); 
                 #endif 
 
@@ -1250,7 +1250,8 @@ void initialiseCANBus() {
     CAN_Start();
 
     msgInQ = xQueueCreate(36, 8);
-    msgOutQ = xQueueCreate(384, 8); // Increased to hold 32 iterations of 12 key messages
+    msgOutQ = xQueueCreate(36, 8);
+    // msgOutQ = xQueueCreate(384, 8); // Increased to hold 32 iterations of 12 key messages
 
     CAN_TX_Semaphore = xSemaphoreCreateCounting(3,3);
 }
@@ -1325,6 +1326,52 @@ void initSoundAllocator() {
     freeTop = MAX_SOUNDS;
 }
 
+void printAverageTime(const char* taskName, uint32_t totalTime, int iterations) {
+    Serial.print(taskName);
+    Serial.print(" Average WCET: ");
+    Serial.print((float)totalTime / iterations);
+    Serial.println(" us");
+}
+
+void profileTask(void (*taskFunction)(void*), const char* taskName, const int iterations = 32, bool delayBetweenIterations = false) {
+    uint32_t totalTime = 0;
+
+    for(int i = 0; i < iterations; i++) {
+        if (delayBetweenIterations) delay(2); // Give hardware time to complete operations between iterations
+
+        uint32_t start = micros();
+        taskFunction(NULL); 
+        uint32_t end = micros();
+        totalTime += (end - start);
+    }
+
+    printAverageTime(taskName, totalTime, iterations);
+}
+
+void profileISR(void (*isrFunction)(void), const char* taskName, const int iterations = 32, bool binarySemaphore = false, bool isSampleISR = false) {
+    uint32_t totalTime = 0;
+
+    for(int i = 0; i < iterations; i++) {
+        #ifdef I2C_EXPANDER_KNOBS
+            if (binarySemaphore) xSemaphoreTake(knobSemaphore, 0); // Empty the binary semaphore so the give is not rejected
+        #endif
+        if (isSampleISR) {
+            // Force the parameters update loop to recalculate steps for all 16 sounds
+            // And inject a dummy command to simulate queue processing overhead.
+            // Dummy key so NOTE_OFF safely forces a full array search without killing active sounds
+            globalParams.hasChanged = true;
+            pushNoteOffCommand(255, false); 
+        }
+
+        uint32_t start = micros();
+        isrFunction();
+        uint32_t end = micros();
+        totalTime += (end - start);
+    }
+
+    printAverageTime(taskName, totalTime, iterations);
+}
+
 // ================================================= //
 // ===================== Setup ===================== //
 // ================================================= //
@@ -1370,91 +1417,31 @@ void setup() {
 // ===================== Loop ====================== //
 // ================================================= //
 
-void standardProfile(std::function <void()> taskFunction, const char* taskName, const int iterations = 32) {
-    uint32_t totalTime = 0;
-
-    for(int i = 0; i < iterations; i++) {
-        uint32_t start = micros();
-        taskFunction();
-        uint32_t end = micros();
-        totalTime += (end - start);
-    }
-
-    Serial.print(taskName);
-    Serial.print(" Average WCET: ");
-    Serial.print(totalTime / iterations);
-    Serial.println(" us");
-
-}
-
 void loop() {
     #ifdef PROFILING_MODE
-        uint32_t startTime = 0;
-        uint32_t endTime = 0;
         const int iterations = 32;
 
         #ifdef PROFILE_SCANKEYS
-            startTime = micros();
-
-            for(int i = 0; i < iterations; i++) scanKeysTask(NULL);
-            
-            endTime = micros();
-            Serial.print("scanKeysTask ");
+            profileTask(scanKeysTask, "scanKeysTask");
         #endif
 
         #ifdef PROFILE_DISPLAY
-            startTime = micros();
-            
-            for(int i = 0; i < iterations; i++) displayUpdateTask(NULL);
-            
-            endTime = micros();
-            Serial.print("displayUpdateTask ");
+            profileTask(displayUpdateTask, "displayUpdateTask");
         #endif
 
         #ifdef PROFILE_DECODE
-            // Reset the audio command queue so pushNoteOnCommand writes 
-            // to memory instead of skipping because the queue is full.
+            // Reset the audio command queue so pushNoteOnCommand writes to memory instead of skipping because the queue is full.
             audioCommandWriteIdx = 0;
             audioCommandReadIdx = 0;
-
-            startTime = micros();
-            
-            for(int i = 0; i < iterations; i++) decodeTask(NULL);
-
-            endTime = micros();
-            Serial.print("decodeTask ");
+            profileTask(decodeTask, "decodeTask");
         #endif
 
         #ifdef PROFILE_KNOB
-            startTime = micros();
-            
-            for(int i = 0; i < iterations; i++) knobTask(NULL);
-            
-            endTime = micros();
-            Serial.print("KnobTask ");
+            profileTask(knobTask, "knobTask");
         #endif
 
         #ifdef PROFILE_CAN_TX
-            uint32_t totalTime = 0;
-            
-            for(int i = 0; i < iterations; i++) {
-                // Give CAN harware time to transmit each frame and empty mailbox
-                delay(2);
-
-                uint32_t start = micros();
-
-                CAN_TX_Task(NULL);
-
-                uint32_t end = micros();
-                totalTime += (end - start);
-            }
-
-            Serial.print("CAN_TX_Task ");
-            Serial.print("Average WCET: ");
-            Serial.print(totalTime / iterations);
-            Serial.println(" us");
-
-            while(1); // Stop execution
+            profileTask(CAN_TX_Task, "CAN_TX_Task", iterations, true); // Add delay between iterations
         #endif
 
         #ifdef PROFILE_SAMPLE_ISR
@@ -1469,81 +1456,23 @@ void loop() {
                 sounds[i].volume = 0; 
             }
 
-            uint32_t totalTime = 0;
-
-            for(int i = 0; i < iterations; i++) {
-                // Force the parameters update loop to recalculate steps for all 16 voices
-                globalParams.hasChanged = true;
-                
-                // Inject a dummy command to simulate queue processing overhead.
-                // Key 255 doesn't exist, so NOTE_OFF safely forces a full array search 
-                // without killing active sounds
-                pushNoteOffCommand(255, false); 
-                
-                // 4. Time the pure execution
-                uint32_t start = micros();
-                sampleISR();
-                uint32_t end = micros();
-                
-                totalTime += (end - start);
-            }
-
-            Serial.print("sampleISR ");
-            Serial.print("Average WCET: ");
-            Serial.print(totalTime / iterations);
-            Serial.println(" us");
-            
-            while(1); // Stop execution
+            profileISR(sampleISR, "sampleISR", iterations, false, true);
         #endif
 
         #ifdef PROFILE_CAN_RX_ISR
             xQueueReset(msgInQ);
-            startTime = micros();
-
-            for(int i = 0; i < iterations; i++) CAN_RX_ISR();
-
-            endTime = micros();
-            Serial.print("CAN_RX_ISR ");
+            profileISR(CAN_RX_ISR, "CAN_RX_ISR");
         #endif
 
         #ifdef PROFILE_CAN_TX_ISR
             vSemaphoreDelete(CAN_TX_Semaphore);
             CAN_TX_Semaphore = xSemaphoreCreateCounting(255, 0);
-            startTime = micros();
-            
-            for(int i = 0; i < iterations; i++) CAN_TX_ISR();
-            
-            endTime = micros();
-            Serial.print("CAN_TX_ISR ");
+            profileISR(CAN_TX_ISR, "CAN_TX_ISR");
         #endif
 
         #ifdef PROFILE_KNOB_ISR
-            uint32_t totalTime = 0;
-            
-            for(int i = 0; i < iterations; i++) {
-                // Empty the binary semaphore so the give is not rejected
-                xSemaphoreTake(knobSemaphore, 0);
-
-                uint32_t start = micros();
-
-                knobISR();
-
-                uint32_t end = micros();
-                totalTime += (end - start);
-            }
-
-            Serial.print("KnobISR ");
-            Serial.print("Average WCET: ");
-            Serial.print(totalTime / iterations);
-            Serial.println(" us");
-
-            while(1); // Stop execution
+            profileISR(knobISR, "knobISR", iterations, true, false); // Add binary semaphore handling
         #endif
-
-        float totalTime = endTime - startTime;
-        Serial.print("Average WCET: ");
-        Serial.print(totalTime / iterations);
-        Serial.println(" us");
 
         while(1); // Stop execution
     #endif
