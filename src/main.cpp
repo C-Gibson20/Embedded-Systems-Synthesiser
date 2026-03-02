@@ -8,11 +8,28 @@
 #include "Knob.h"
 #include "sine_lut.h"
 
-// --- PROFILING SYSTEM ---
-// #define PROFILING_MODE  
-// #define V1
+// ================================================= //
+// ==================== Versions =================== //
+// ================================================= //
 
+// #define V1
 #define V2
+
+#ifdef V2
+    #define I2C_EXPANDER_KNOBS
+#endif 
+
+#ifdef I2C_EXPANDER_KNOBS
+  SemaphoreHandle_t i2cMutex; 
+  SemaphoreHandle_t knobSemaphore;
+  const int EXPANDER_INT_PIN = PA10;
+#endif
+
+// ================================================= //
+// =================== Profiling =================== //
+// ================================================= //
+
+// #define PROFILING_MODE  
 #ifdef PROFILING_MODE
     #define DISABLE_THREADS
     #define DISABLE_ISRS
@@ -20,19 +37,22 @@
     // #define PROFILE_SCANKEYS
     // #define PROFILE_DISPLAY
     // #define PROFILE_DECODE
-    // #define PROFILE_KNOB
     // #define PROFILE_CAN_TX
 
     // #define PROFILE_SAMPLE_ISR
     // #define PROFILE_CAN_RX_ISR
     // #define PROFILE_CAN_TX_ISR
-    // #define PROFILE_KNOB_ISR
+
+    // #ifdef I2C_EXPANDER_KNOBS
+        // #define PROFILE_KNOB
+        // #define PROFILE_KNOB_ISR
+    // #endif
 #endif
-// --------------------------- 
 
 // ================================================= //
-// --- DIRECT PORT MANIPULATION MACROS (STM32L432KC) //
+// ============ Direct Port Manipulation =========== //
 // ================================================= //
+
 #if defined(ARDUINO_ARCH_STM32)
     // A5 = PA6 (REN_PIN)  <-- FIXED!
     #define REN_HIGH()  (GPIOA->BSRR = (1 << 6))
@@ -76,9 +96,11 @@
     #define OUT_HIGH()  (digitalWrite(OUT_PIN, HIGH))
     #define OUT_LOW()   (digitalWrite(OUT_PIN, LOW))
 #endif
-// -----------------------------------------------------
 
-//Constants
+// ================================================= //
+// =================== Constants =================== //
+// ================================================= //
+
 const uint32_t displayInterval = 100; 
 const uint32_t scanInterval = 20;
   
@@ -118,7 +140,21 @@ constexpr uint32_t stepSizes[] = {
     (uint32_t)(f_notes[11] * pow2_32 / fs)
 };
 
-//Shared state
+//Knobs
+const uint8_t pitchIdx = 0;
+const uint8_t waveIdx = 1;
+const uint8_t octaveIdx = 2;
+const uint8_t volumeIdx = 3;
+const uint8_t octaveOffsetIdx = 4;
+
+//Sounds
+const int MAX_SOUNDS = 16;
+constexpr int AUDIO_COMMAND_QUEUE_LENGTH = 32;
+
+// ================================================= //
+// ================== Shared State ================= //
+// ================================================= //
+
 enum SynthRole { SENDER, RECEIVER, SINGLE };
 enum SynthWaveform {SQUARE, SAW, TRIANGLE, SINE, SUPERSAW, SINEFOLD};
 enum OctaveControlMode {OCTAVE_LOCAL, OCTAVE_OFFSET};
@@ -144,29 +180,19 @@ struct {
     SemaphoreHandle_t mutex;
 } sysState;
 
-// SemaphoreHandle_t knobSemaphore;
 SemaphoreHandle_t CAN_TX_Semaphore;
 
+//Knobs
 Knob knobs[5] = {
     Knob(0, -128, 127),
     Knob(0, 0, 5),
     Knob(4, 0, 8), // Local octave control
     Knob(2, 0, 8),
-    Knob(0, -8, 8) // Octave offset for RECEIVER role when in OCTAVE_OFFSET mode  
+    Knob(0, -8, 8) // Octave offset for RECEIVER role when in OCTAVE_OFFSET mode 
 };
-const uint8_t volumeIdx = 3;
-const uint8_t octaveIdx = 2;
-const uint8_t octaveOffsetIdx = 4;
-const uint8_t waveIdx = 1;
-const uint8_t pitchIdx = 0;
 
-//CAN Bus Communication
-QueueHandle_t msgInQ;
-QueueHandle_t msgOutQ;
-
-//Sound Handling
-const int MAX_SOUNDS = 16;
-enum AudioCommandType {NOTE_ON, NOTE_OFF, HOLD_ON, HOLD_OFF, ROLE_CHANGE}; //, SOUND_UPDATE};
+//Sounds
+enum AudioCommandType {NOTE_ON, NOTE_OFF, HOLD_ON, HOLD_OFF, ROLE_CHANGE}; 
 
 struct Sound {
     uint32_t step;
@@ -178,7 +204,7 @@ struct Sound {
     uint8_t key;
     bool active;
     bool held;
-    bool remote; // Indicates if the sound was triggered by a remote message
+    bool remote; 
 };
 
 struct GlobalParameters {
@@ -191,7 +217,7 @@ struct GlobalParameters {
 
 struct AudioCommand {
     AudioCommandType type;
-    SynthRole newRole; // Used only for ROLE_CHANGE commands
+    SynthRole newRole;
     uint8_t key;
     uint32_t step;
     uint8_t volume;
@@ -210,12 +236,14 @@ volatile uint8_t freeSounds[MAX_SOUNDS];
 volatile uint8_t freeTop = 0;
 volatile GlobalParameters globalParams;
 
-constexpr int AUDIO_COMMAND_QUEUE_LENGTH = 32;
 AudioCommand audioCommandQueue[AUDIO_COMMAND_QUEUE_LENGTH];
 volatile uint8_t audioCommandWriteIdx = 0;
 volatile uint8_t audioCommandReadIdx = 0;
 
-//Pin definitions
+// ================================================= //
+// ================ Pin Definitions ================ //
+// ================================================= //
+
 //Row select and enable
 const int RA0_PIN = D3;
 const int RA1_PIN = D6;
@@ -250,9 +278,24 @@ U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2(U8G2_R0);
 //Hardware Timer
 HardwareTimer sampleTimer(TIM1);
 
+//CAN Bus Communication
+QueueHandle_t msgInQ;
+QueueHandle_t msgOutQ;
+
 // ================================================= //
 // ================ Hardware Helpers =============== //
 // ================================================= //
+
+#ifdef I2C_EXPANDER_KNOBS
+
+    void wireWrites(uint8_t enableAddress, uint8_t writeVal) {
+        Wire.beginTransmission(EXPANDER_ADDR);
+        Wire.write(enableAddress);
+        Wire.write(writeVal);
+        Wire.endTransmission();
+    }
+
+#endif
 
 //Function to set outputs using key matrix
 void setOutMuxBit(const uint8_t bitIdx, const bool value) {
@@ -290,6 +333,12 @@ void setRow(uint8_t rowIdx){
     if (rowIdx & 0x01) RA0_HIGH(); else RA0_LOW();
     if (rowIdx & 0x02) RA1_HIGH(); else RA1_LOW();
     if (rowIdx & 0x04) RA2_HIGH(); else RA2_LOW();
+
+    #ifdef I2C_EXPANDER_KNOBS 
+        if (rowIdx == 2) OUT_LOW(); else OUT_HIGH();
+    #else
+        OUT_HIGH();
+    #endif
 
     // Set Row Select Enable High
     REN_HIGH();
@@ -431,6 +480,20 @@ void handleWaveforms(SynthWaveform waveform, uint8_t index, uint32_t &uncentered
 // ================================================= //
 // ============= Interrupt Subroutines ============= //
 // ================================================= //
+
+#ifdef I2C_EXPANDER_KNOBS
+
+    void knobISR() {
+        #ifdef PROFILING_MODE
+            xSemaphoreGive(knobSemaphore);
+        #else
+            BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+            xSemaphoreGiveFromISR(knobSemaphore, &xHigherPriorityTaskWoken);
+            portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+        #endif
+    }
+
+#endif
 
 void sampleISR() {
     processAudioCommands();
@@ -582,6 +645,8 @@ void handleSynthRole(bool westConnected, bool eastConnected, bool pitchPressed) 
     else if (!overwrittenAutoConfig && !westConnected && eastConnected) role = SENDER;
     else if (!overwrittenAutoConfig && westConnected) role = RECEIVER;
 
+    role = RECEIVER; // Force receiver for testing
+
     if (role != lastRole) pushRoleChangeCommand(role);
     lastRole = role;
 
@@ -592,12 +657,19 @@ void handleSynthRole(bool westConnected, bool eastConnected, bool pitchPressed) 
 
 void updateRotations(uint8_t rowIdx, std::bitset<4> cols, OctaveControlMode localOctaveMode) {
     #ifdef V1
-        if (3 <= rowIdx  && rowIdx < 5) {
-            uint8_t knobIndex = (rowIdx == 3) ? 3 : 1;
-            uint8_t offset = ((knobIndex == 3) && (localOctaveMode == OCTAVE_LOCAL)) ? -1 : +1; 
-
-            knobs[knobIndex].updateRotation(cols[0],cols[1]);
-            knobs[knobIndex + offset].updateRotation(cols[2],cols[3]);
+        if (rowIdx == 3) {
+            knobs[3].updateRotation(cols[0], cols[1]);
+            
+            if (localOctaveMode == OCTAVE_LOCAL) {
+                knobs[2].updateRotation(cols[2], cols[3]);
+                knobs[4].setInitialState(cols[2], cols[3]); // Sync octave offset knob with local octave
+            } else {
+                knobs[4].updateRotation(cols[2], cols[3]);
+                knobs[2].setInitialState(cols[2], cols[3]); // Sync local octave knob with octave offset
+            }
+        } else if (rowIdx == 4) {
+            knobs[1].updateRotation(cols[0], cols[1]);
+            knobs[0].updateRotation(cols[2], cols[3]);
         }
     #elifdef V2
         if (rowIdx == 3) {
@@ -605,7 +677,13 @@ void updateRotations(uint8_t rowIdx, std::bitset<4> cols, OctaveControlMode loca
             knobs[0].updateRotation(cols[2], cols[3]);
         }
         if (rowIdx == 4) {
-            knobs[(localOctaveMode == OCTAVE_LOCAL) ? octaveIdx : octaveOffsetIdx].updateRotation(cols[0], cols[1]);
+            if (localOctaveMode == OCTAVE_LOCAL){
+                knobs[2].updateRotation(cols[0], cols[1]);
+                knobs[4].setInitialState(cols[0], cols[1]); // Sync octave offset knob with local octave
+            } else {
+                knobs[4].updateRotation(cols[0], cols[1]);
+                knobs[2].setInitialState(cols[0], cols[1]); // Sync local octave knob with octave offset
+            }
             knobs[1].updateRotation(cols[2], cols[3]);
         }
     #endif
@@ -639,7 +717,7 @@ void handleSwitches(bool volumePressed, bool wavePressed, bool octavePressed) {
 void updateSwitchesAndConnections(std::bitset<4> cols, uint8_t rowIdx, bool &westConnected, bool &eastConnected) {
     if (rowIdx == 5) {
         westConnected = (cols[3] == 0);
-        #ifdef V1s
+        #ifdef V1
             knobs[2].updateSwitch(cols[0]); // C0: Knob 0 S
             knobs[3].updateSwitch(cols[1]); // C1: Knob 3 S
         #elifdef V2
@@ -742,6 +820,60 @@ void updateGlobalParams(uint32_t &lastPitch, uint8_t &lastVolume, uint8_t &lastW
 // ===================== Tasks ===================== //
 // ================================================= //
 
+#ifdef I2C_EXPANDER_KNOBS
+
+    void knobTask(void * pvParameters) {
+        #ifndef DISABLE_THREADS
+            while (1) {
+                xSemaphoreTake(knobSemaphore, portMAX_DELAY);
+        #endif
+                xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+                OctaveControlMode octaveMode = sysState.octaveMode;
+                xSemaphoreGive(sysState.mutex);
+
+                int retryCount = 0;
+                do {
+                    // Safely claim the I2C bus
+                    xSemaphoreTake(i2cMutex, portMAX_DELAY);
+                    Wire.beginTransmission(EXPANDER_ADDR);
+                    Wire.write(REG_INPUT);
+                    Wire.endTransmission();
+                    Wire.requestFrom(EXPANDER_ADDR, (uint8_t)1);
+                    uint8_t currByte = Wire.read();
+                    xSemaphoreGive(i2cMutex);
+
+                    for (int i = 0; i < 4; i++) {
+                        if (i == 2) continue;
+                        uint8_t bitA = (currByte >> (i * 2)) & 0x01;
+                        uint8_t bitB = (currByte >> (i * 2 + 1)) & 0x01;
+                        knobs[i].updateRotation(bitA, bitB);
+                    }
+
+                    // Context dependent mapping of octave and octave offset knob
+                    uint8_t bitA = (currByte >> 4) & 0x01;
+                    uint8_t bitB = (currByte >> 5) & 0x01;
+
+                    if (octaveMode == OCTAVE_LOCAL) {
+                        knobs[2].updateRotation(bitA, bitB);
+                        knobs[4].setInitialState(bitA, bitB); // Sync octave offset knob with local octave
+                    } else {
+                        knobs[4].updateRotation(bitA, bitB);
+                        knobs[2].setInitialState(bitA, bitB); // Sync local octave knob with octave offset
+                    }
+
+                    retryCount++;
+                    // Yield briefly to let other equal/higher priority tasks run if stuck
+                    vTaskDelay(pdMS_TO_TICKS(1)); 
+                    
+                } while (digitalRead(EXPANDER_INT_PIN) == LOW && retryCount < 3);
+
+        #ifndef DISABLE_THREADS
+            }
+        #endif
+    }
+
+#endif
+
 void scanKeysTask(void * pvParameters) {
     const TickType_t xFrequency = scanInterval/portTICK_PERIOD_MS;
     TickType_t xLastWakeTime = xTaskGetTickCount();
@@ -771,7 +903,12 @@ void scanKeysTask(void * pvParameters) {
                 delayMicroseconds(3);
                 std::bitset<4> cols = readCols();
 
-                updateRotations(i, cols, localOctaveMode); 
+                #ifdef I2C_EXPANDER_KNOBS
+                    if (i == 3 || i == 4) continue;
+                #else 
+                    updateRotations(i, cols, localOctaveMode); 
+                #endif 
+
                 updateSwitchesAndConnections(cols, i, westConnected, eastConnected);
                 mapColumnsToSet(localInputs, cols, i);
             }
@@ -946,7 +1083,17 @@ void displayUpdateTask(void * pvParameters) {
 
             #endif
 
-            if (displayStateChanged(lastDisplayState, displayState, lastMsg, msg)) u8g2.sendBuffer();
+            if (displayStateChanged(lastDisplayState, displayState, lastMsg, msg)) {
+                #ifdef I2C_EXPANDER_KNOBS
+                    xSemaphoreTake(i2cMutex, portMAX_DELAY);
+                #endif
+
+                u8g2.sendBuffer();
+            
+                #ifdef I2C_EXPANDER_KNOBS
+                    xSemaphoreGive(i2cMutex);
+                #endif
+            }
 
             lastDisplayState = displayState;
             lastMsg = msg;
@@ -962,6 +1109,44 @@ void displayUpdateTask(void * pvParameters) {
 // ================================================= //
 // ================= Setup Helpers ================= //
 // ================================================= //
+
+#ifdef I2C_EXPANDER_KNOBS
+
+    void clearInterruptAndSync(uint8_t address, uint8_t writeVal) {
+        Wire.beginTransmission(address);
+        Wire.write(writeVal);
+        Wire.endTransmission();
+        Wire.requestFrom(address, (uint8_t)1); // Dummy read to clear interrupt
+        if (Wire.available()) {
+            uint8_t startByte = Wire.read();
+            for (int i = 0; i < 4; i++) {
+                uint8_t bitA = (startByte >> (i * 2)) & 0x01;
+                uint8_t bitB = (startByte >> (i * 2 + 1)) & 0x01;
+                knobs[i].setInitialState(bitA, bitB);
+                if (i == 2) knobs[4].setInitialState(bitA, bitB); // Sync octave offset knob with local octave on startup
+            }
+        }
+    }
+
+    void initialisePCAL6408A() {
+        i2cMutex = xSemaphoreCreateMutex();
+        knobSemaphore = xSemaphoreCreateBinary();
+
+        pinMode(EXPANDER_INT_PIN, INPUT_PULLUP);
+
+        Wire.begin();
+        wireWrites(REG_PULL_EN, 0xFF); // Enable pull-ups on all pins
+        wireWrites(REG_LAT_EN, 0xFF); // Enable latched output for all pins
+        wireWrites(REG_INT_MASK, 0x00); // Enable interrupts on all pins
+
+        clearInterruptAndSync(EXPANDER_ADDR, 0x00);
+
+        #ifndef DISABLE_ISRS
+            attachInterrupt(digitalPinToInterrupt(EXPANDER_INT_PIN), knobISR, FALLING);
+        #endif
+    }
+
+    #endif
 
 void setPinDirections() {
     pinMode(RA0_PIN, OUTPUT);
@@ -987,7 +1172,11 @@ void initialiseDisplay() {
     setOutMuxBit(DRST_BIT, HIGH);  //Release display logic reset
     u8g2.begin();
     setOutMuxBit(DEN_BIT, HIGH);  //Enable display power supply
-    setOutMuxBit(KNOB_MODE, HIGH);  //Do read knobs through key matrix
+    #ifdef I2C_EXPANDER_KNOBS
+        setOutMuxBit(KNOB_MODE, LOW);  //Do not read knobs through key matrix
+    #else 
+        setOutMuxBit(KNOB_MODE, HIGH);  //Do read knobs through key matrix
+    #endif
 }
 
 void initialiseCANBus() {
@@ -1012,28 +1201,30 @@ void initialiseKnobs() {
     
     for (int i = 0; i < 5; i++) knobs[i].begin();
     
-    for (int i = 3; i < 5; i++) {
-        setRow(i);
-        delayMicroseconds(3);
-        std::bitset<4> cols = readCols();
-        
-        #ifdef V1
-            uint8_t knobIndex = (i == 3) ? 3 : 1;
-            knobs[knobIndex].setInitialState(cols[0],cols[1]);
-            knobs[knobIndex-1].setInitialState(cols[2],cols[3]);
-            if (i == 3) knobs[4].setInitialState(cols[2], cols[3]);
-        #elifdef V2
-            if (i == 3) {
-                knobs[3].setInitialState(cols[0], cols[1]);
-                knobs[0].setInitialState(cols[2], cols[3]);
-            }
-            if (i == 4) {
-                knobs[2].setInitialState(cols[0], cols[1]);
-                knobs[4].setInitialState(cols[0], cols[1]);
-                knobs[1].setInitialState(cols[2], cols[3]);
-            }
-        #endif
-    }
+    #ifndef I2C_EXPANDER_KNOBS
+        for (int i = 3; i < 5; i++) {
+            setRow(i);
+            delayMicroseconds(3);
+            std::bitset<4> cols = readCols();
+            
+                #ifdef V1
+                    uint8_t knobIndex = (i == 3) ? 3 : 1;
+                    knobs[knobIndex].setInitialState(cols[0],cols[1]);
+                    knobs[knobIndex-1].setInitialState(cols[2],cols[3]);
+                    if (i == 3) knobs[4].setInitialState(cols[2], cols[3]);
+                #elifdef V2
+                    if (i == 3) {
+                        knobs[3].setInitialState(cols[0], cols[1]);
+                        knobs[0].setInitialState(cols[2], cols[3]);
+                    }
+                    if (i == 4) {
+                        knobs[2].setInitialState(cols[0], cols[1]);
+                        knobs[4].setInitialState(cols[0], cols[1]);
+                        knobs[1].setInitialState(cols[2], cols[3]);
+                    }
+                #endif
+        }
+    #endif
 }
 
 void initialiseHardwareTimer() {
@@ -1048,6 +1239,11 @@ void initialiseHardwareTimer() {
 
 void initialiseThreads() {
     #ifndef DISABLE_THREADS
+        #ifdef I2C_EXPANDER_KNOBS
+            TaskHandle_t knobHandle = NULL;
+            xTaskCreate(knobTask, "knobTask", 256, NULL, 2, &knobHandle);
+        #endif
+
         TaskHandle_t scanKeysHandle = NULL;
         TaskHandle_t decodeHandle = NULL;
         TaskHandle_t displayUpdateHandle = NULL;
@@ -1074,6 +1270,12 @@ void setup() {
     //Set pin directions
     setPinDirections();
 
+    //Initialise Knobs
+    initialiseKnobs();
+    #ifdef I2C_EXPANDER_KNOBS
+        initialisePCAL6408A();
+    #endif
+
     //Initialise display
     initialiseDisplay();
 
@@ -1083,9 +1285,6 @@ void setup() {
 
     //Initialise CAN bus
     initialiseCANBus();
-
-    //Initialise PCAL6408A (using i2cMutex)
-    initialiseKnobs();
 
     // Initialize the sounds
     initSoundAllocator();
