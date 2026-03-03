@@ -14,7 +14,6 @@ Knob::Knob(int8_t startVal, int8_t min, int8_t max) :
 }
 
 void Knob::begin() {
-    mutex = xSemaphoreCreateMutex();
 }
 
 void Knob::setInitialState(uint8_t currA, uint8_t currB) {
@@ -28,9 +27,8 @@ void Knob::updateRotation(uint8_t currA, uint8_t currB) {
 
     if (currState != prevState) {
         // "Impossible" transition logic
-        if ((currState ^ prevState) == 0b11) {
-            change = lastDirection;
-        }
+        if ((currState ^ prevState) == 0b11) change = lastDirection;
+        
         // Normal transitions
         else if ((prevState == 0b00 && currState == 0b01) || (prevState == 0b11 && currState == 0b10)) {
             change = 1; 
@@ -41,44 +39,29 @@ void Knob::updateRotation(uint8_t currA, uint8_t currB) {
             lastDirection = -1;
         }
         prevState = currState;
-    }
 
-    if (change != 0) {
-        xSemaphoreTake(mutex, portMAX_DELAY);
-        rotation = std::clamp<int8_t>(rotation + change, lowerLimit, upperLimit);
-        int8_t localCopy = rotation;
-        xSemaphoreGive(mutex);
-        
-        // Sync with atomic for ISR
-        __atomic_store_n(&atomicRotation, localCopy, __ATOMIC_RELAXED);
+        if (change != 0) {
+            int8_t current = __atomic_load_n(&atomicRotation, __ATOMIC_RELAXED);
+            int8_t newValue = current + change;
+
+            if (newValue > upperLimit) newValue = upperLimit;
+            if (newValue < lowerLimit) newValue = lowerLimit;
+
+            __atomic_store_n(&atomicRotation, newValue, __ATOMIC_RELAXED);
+        }
     }
 }
 
 void Knob::updateSwitch(bool bitS) {
     bool pressed = (bitS == 0);
-    if (pressed && !buttonWasPressed) {
-        buttonChanged = true;
-    }
+    if (pressed && !buttonWasPressed) __atomic_store_n(&buttonChanged, true, __ATOMIC_RELEASE);
     buttonWasPressed = pressed;
 }
 
 bool Knob::isPressed() {
-    if (buttonChanged) {
-        buttonChanged = false;
-        return true;
-    }
-    return false;
+    return __atomic_exchange_n(&buttonChanged, false, __ATOMIC_ACQ_REL);
 }
 
-// Reading for display
 int8_t Knob::getValue() {
-    xSemaphoreTake(mutex, portMAX_DELAY);
-    int8_t val = rotation;
-    xSemaphoreGive(mutex);
-    return val;
-}
-
-// Reading for ISR
-int8_t Knob::getValueISR() {
     return __atomic_load_n(&atomicRotation, __ATOMIC_RELAXED);
 }
