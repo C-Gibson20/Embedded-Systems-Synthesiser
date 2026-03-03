@@ -25,6 +25,8 @@
   const int EXPANDER_INT_PIN = PA10;
 #endif
 
+#define CAN_INIT_TRUE
+
 // ================================================= //
 // =================== Profiling =================== //
 // ================================================= //
@@ -33,6 +35,7 @@
 #ifdef PROFILING_MODE
     #define DISABLE_THREADS
     #define DISABLE_ISRS
+    #define CAN_INIT_TRUE
   
     #define PROFILE_SCANKEYS
     #define PROFILE_DISPLAY
@@ -1020,7 +1023,11 @@ void scanKeysTask(void * pvParameters) {
                 bool isSingle = (localRole == SINGLE);
 
                 for (int i = 0; i < 12; i++) {
-                    if (!isSingle) constructAndSendTXMessage(localInputs, prevInputs, i, TX_Message);
+                    #ifdef CAN_INIT_TRUE
+                        if (!isSingle) constructAndSendTXMessage(localInputs, prevInputs, i, TX_Message);
+                    #else
+                        if (isSender) constructAndSendTXMessage(localInputs, prevInputs, i, TX_Message);
+                    #endif
                     
                     if (!isSender) {
                         bool isPressed = (localInputs[i] == 0);
@@ -1272,7 +1279,7 @@ void initialiseDisplay() {
 }
 
 void initialiseCANBus() {
-    #ifdef PROFILING_MODE
+    #ifdef CAN_INIT_TRUE
         CAN_Init(true);
     #else
         CAN_Init(false);
