@@ -5,150 +5,199 @@
 #include "Knob.h"
 #include "constants.h"
 #include "pins.h"
+#include "io/KeyMatrix.h"
 
-U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2(U8G2_R0);
+Display display;
 
-// From main.cpp
-extern volatile struct Sound sounds[];   // needs Sound struct visible — see note below
+// ================================================= //
+// ============= I2C Display Callback ============== //
+// ================================================= //
+
+#ifdef I2C_EXPANDER_KNOBS
+extern SemaphoreHandle_t i2cMutex;
+
+extern "C" uint8_t u8x8_byte_rtos_hw_i2c(u8x8_t *u8x8, uint8_t msg, uint8_t arg_init, void *arg_ptr) {
+    uint8_t *data;
+    switch (msg) {
+        case U8X8_MSG_BYTE_SEND:
+            data = (uint8_t *)arg_ptr;
+            while (arg_init > 0) {
+                Wire.write((uint8_t)*data);
+                data++;
+                arg_init--;
+            }
+            break;
+        case U8X8_MSG_BYTE_INIT:
+            // Wire.begin() already initialised in setup
+            break;
+        case U8X8_MSG_BYTE_SET_DC:
+            // Not used for I2C display
+            break;
+        case U8X8_MSG_BYTE_START_TRANSFER:
+            xSemaphoreTake(i2cMutex, portMAX_DELAY);
+            Wire.beginTransmission(u8x8_GetI2CAddress(u8x8) >> 1);
+            break;
+        case U8X8_MSG_BYTE_END_TRANSFER:
+            Wire.endTransmission();
+            xSemaphoreGive(i2cMutex);
+            break;
+    }
+    return 1;
+}
+#endif
+
+// ================================================= //
+// ================ External state ================= //
+// ================================================= //
+
+extern volatile struct Sound sounds[];
 extern Knob knobs[];
-extern void setOutMuxBit(const uint8_t bitIdx, const bool value);
 
-void updateDisplayState() {
+// ================================================= //
+// ================ Display private ================ //
+// ================================================= //
+
+void Display::updateState() {
     xSemaphoreTake(sysState.mutex, portMAX_DELAY);
     OctaveControlMode octaveMode = sysState.octaveMode;
     xSemaphoreGive(sysState.mutex);
 
     uint8_t displayOctaveIdx = (octaveMode == OCTAVE_LOCAL) ? octaveIdx : octaveOffsetIdx;
     // TODO: data race — sounds[] is written by sampleISR without synchronisation.
-    // Fix: read inside a critical section (taskENTER_CRITICAL / taskEXIT_CRITICAL)
-    // or maintain a separate ISR-safe active-notes bitmask.
+    // Fix: read inside a critical section or maintain an ISR-safe active-notes bitmask.
     uint16_t activeNotes = 0;
     for (int i = 0; i < MAX_VOICES; i++) {
         if (sounds[i].active) activeNotes |= (1 << sounds[i].key);
     }
 
     xSemaphoreTake(sysState.mutex, portMAX_DELAY);
-    sysState.displayState.waveform = knobs[waveIdx].getValue();
-    sysState.displayState.volume = knobs[volumeIdx].getValue();
-    sysState.displayState.pitch = knobs[pitchIdx].getValue();
-    sysState.displayState.octave = knobs[displayOctaveIdx].getValue();
-    sysState.displayState.role = sysState.role;
-    sysState.displayState.octaveMode = sysState.octaveMode;    
+    sysState.displayState.waveform    = knobs[waveIdx].getValue();
+    sysState.displayState.volume      = knobs[volumeIdx].getValue();
+    sysState.displayState.pitch       = knobs[pitchIdx].getValue();
+    sysState.displayState.octave      = knobs[displayOctaveIdx].getValue();
+    sysState.displayState.role        = sysState.role;
+    sysState.displayState.octaveMode  = sysState.octaveMode;
     sysState.displayState.activeNotes = activeNotes;
     xSemaphoreGive(sysState.mutex);
-}  
+}
 
-bool displayStateChanged(const DisplayState &lastState, const DisplayState &currentState, const std::array<uint8_t, 8> &lastMsg, const std::array<uint8_t, 8> &currentMsg) {
-    if (lastState.waveform != currentState.waveform ||
-        lastState.volume != currentState.volume ||
-        lastState.pitch != currentState.pitch ||
-        lastState.octave != currentState.octave ||
-        lastState.role != currentState.role ||
-        lastState.octaveMode != currentState.octaveMode ||
-        lastState.activeNotes != currentState.activeNotes) {
+bool Display::stateChanged(const DisplayState &last, const DisplayState &current,
+                            const std::array<uint8_t, 8> &lastMsg,
+                            const std::array<uint8_t, 8> &currentMsg) {
+    if (last.waveform    != current.waveform    ||
+        last.volume      != current.volume       ||
+        last.pitch       != current.pitch        ||
+        last.octave      != current.octave       ||
+        last.role        != current.role         ||
+        last.octaveMode  != current.octaveMode   ||
+        last.activeNotes != current.activeNotes) {
         return true;
     }
     return memcmp(lastMsg.data(), currentMsg.data(), 8) != 0;
 }
 
-void displayUpdateTask(void * pvParameters) {
-    const TickType_t xFrequency = DISPLAY_INTERVAL/portTICK_PERIOD_MS;
-    TickType_t xLastWakeTime = xTaskGetTickCount();
+// ================================================= //
+// ================ Display public ================= //
+// ================================================= //
 
-    static std::array<uint8_t, 8> lastMsg = {0};
-    static DisplayState lastDisplayState = {};
+void Display::update() {
+    updateState();
 
-    #ifndef DISABLE_THREADS
-        while (1) { // Standard RTOS mode
-            vTaskDelayUntil( &xLastWakeTime, xFrequency );
+    xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+    std::array<uint8_t, 8> receivedMsg = sysState.RX_Message;
+    std::array<uint8_t, 8> sentMsg     = sysState.TX_Message;
+    SynthRole role                     = sysState.role;
+    OctaveControlMode octaveMode       = sysState.octaveMode;
+    DisplayState displayState          = sysState.displayState;
+    xSemaphoreGive(sysState.mutex);
+
+    std::array<uint8_t, 8> msg = {0};
+
+    u8g2_.clearBuffer();
+    u8g2_.setFont(u8g2_font_ncenB08_tr);
+    u8g2_.setCursor(2, 10);
+
+    #ifdef PROFILE_DISPLAY
+        // WCET: Force the maximum number of pixels to render
+        u8g2_.print("Notes: CC#DD#EFF#GG#AA#B");
+        u8g2_.setCursor(2, 20);
+        u8g2_.print("P: -128, W: SF, O+: 8, V: 8");
+        u8g2_.setCursor(2, 30);
+        u8g2_.print("R:S, P2558");
+        u8g2_.sendBuffer();
+    #else
+        u8g2_.print("Notes: ");
+        for (int i = 0; i < 12; i++) {
+            if (displayState.activeNotes & (1 << i)) u8g2_.print(NOTE_NAMES[i]);
+        }
+
+        u8g2_.setCursor(2, 20);
+        u8g2_.print("P: ");
+        u8g2_.print(displayState.pitch);
+
+        u8g2_.print(", W: ");
+        u8g2_.print(WAVE_NAMES[displayState.waveform]);
+
+        u8g2_.print((octaveMode == OCTAVE_OFFSET) ? ", O+:" : ", O:");
+        u8g2_.print(displayState.octave);
+
+        u8g2_.print(", V: ");
+        u8g2_.print(displayState.volume);
+
+        u8g2_.setCursor(2, 30);
+        u8g2_.print("R:");
+        u8g2_.print(displayState.role == SENDER ? "S" : displayState.role == RECEIVER ? "R" : "1");
+
+        if (role != SINGLE) {
+            msg = (role == SENDER) ? sentMsg : receivedMsg;
+            u8g2_.print(", ");
+            u8g2_.print((char)msg[0]);
+            u8g2_.print(msg[1]);
+            u8g2_.print(msg[2]);
+            u8g2_.print(msg[3]);
+            u8g2_.print(msg[4]);
+            u8g2_.print(msg[5]);
+        }
+
+        if (stateChanged(lastDisplayState_, displayState, lastMsg_, msg)) {
+            u8g2_.sendBuffer();
+        }
     #endif
-            updateDisplayState();
-            xSemaphoreTake(sysState.mutex, portMAX_DELAY);
-            std::array<uint8_t, 8> receivedMsg = sysState.RX_Message;
-            std::array<uint8_t, 8> sentMsg = sysState.TX_Message;
-            SynthRole role = sysState.role;
-            OctaveControlMode octaveMode = sysState.octaveMode;
-            DisplayState displayState = sysState.displayState;
-            xSemaphoreGive(sysState.mutex);
-            std::array<uint8_t, 8> msg = {0};
-        
-            //Update display
-            u8g2.clearBuffer();                 
-            u8g2.setFont(u8g2_font_ncenB08_tr); 
-            u8g2.setCursor(2,10);
 
-            #ifdef PROFILE_DISPLAY
-                // WCET: Force the maximum number of pixels to render
-                u8g2.print("Notes: CC#DD#EFF#GG#AA#B"); // All 12 notes active
-                u8g2.setCursor(2, 20);
-                u8g2.print("P: -128, W: SF, O+: 8, V: 8");         // Max character widths
-                u8g2.setCursor(2,30);
-                u8g2.print("R:S, P2558");                          // Max CAN message width
-                
-                // WCET: Force the I2C transaction every iteration
-                u8g2.sendBuffer();
-            #else
-                u8g2.print("Notes: ");
-                for (int i = 0; i < 12; i++) {
-                    if (displayState.activeNotes & (1 << i)) u8g2.print(NOTE_NAMES[i]);
-                }
-                
-                u8g2.setCursor(2, 20);
-                u8g2.print("P: "); 
-                u8g2.print(displayState.pitch);
-                
-                u8g2.print(", W: ");
-                u8g2.print(WAVE_NAMES[displayState.waveform]);
-                
-                u8g2.print((octaveMode == OCTAVE_OFFSET) ? ", O+:" : ", O:");
-                u8g2.print(displayState.octave);
-                
-                u8g2.print(", V: "); 
-                u8g2.print(displayState.volume);
-                
-                u8g2.setCursor(2, 30);
-                u8g2.print("R:");
-                u8g2.print(displayState.role == SENDER ? "S" : displayState.role == RECEIVER ? "R" : "1");
-                
-                if (role != SINGLE) {
-                    msg = (role == SENDER) ? sentMsg : receivedMsg;
-                    u8g2.print(", ");
-                    u8g2.print((char)msg[0]);
-                    u8g2.print(msg[1]);
-                    u8g2.print(msg[2]);
-                    u8g2.print(msg[3]);
-                    u8g2.print(msg[4]);
-                    u8g2.print(msg[5]);
-                }
+    lastDisplayState_ = displayState;
+    lastMsg_ = msg;
 
-                if (displayStateChanged(lastDisplayState, displayState, lastMsg, msg)) {
-                    u8g2.sendBuffer();
-                }
-                
-            #endif
+    digitalToggle(LED_BUILTIN);
+}
 
-            lastDisplayState = displayState;
-            lastMsg = msg;
+void Display::begin() {
+    setOutMuxBit(DRST_BIT, LOW);   // Assert display logic reset
+    delayMicroseconds(2);
+    setOutMuxBit(DRST_BIT, HIGH);  // Release display logic reset
 
-            //Toggle LED
-            digitalToggle(LED_BUILTIN);
+    #ifdef I2C_EXPANDER_KNOBS
+        u8g2_.getU8x8()->byte_cb = u8x8_byte_rtos_hw_i2c;
+    #endif
 
+    u8g2_.begin();
+    Wire.setClock(1000000);  // Increase I2C clock speed for faster display updates
+
+    setOutMuxBit(DEN_BIT, HIGH);   // Enable display power supply
+}
+
+// ================================================= //
+// ================ FreeRTOS Task ================== //
+// ================================================= //
+
+void displayUpdateTask(void* pvParameters) {
+    #ifndef DISABLE_THREADS
+        const TickType_t xFrequency = DISPLAY_INTERVAL / portTICK_PERIOD_MS;
+        TickType_t xLastWakeTime = xTaskGetTickCount();
+        while (1) {
+            vTaskDelayUntil(&xLastWakeTime, xFrequency);
+    #endif
+            display.update();
     #ifndef DISABLE_THREADS
         }
     #endif
-}
-
-void initialiseDisplay() {
-    setOutMuxBit(DRST_BIT, LOW);  //Assert display logic reset
-    delayMicroseconds(2);
-    setOutMuxBit(DRST_BIT, HIGH);  //Release display logic reset
-
-    #ifdef I2C_EXPANDER_KNOBS
-        u8g2.getU8x8()->byte_cb = u8x8_byte_rtos_hw_i2c;
-    #endif
-
-    u8g2.begin();
-    Wire.setClock(1000000); // Increase I2C clock speed for faster display updates
-
-    setOutMuxBit(DEN_BIT, HIGH);  //Enable display power supply
 }

@@ -3,7 +3,6 @@
 #include <array>                                                           
 #include <STM32FreeRTOS.h>
 
-//TODO: make own header files
 enum SynthRole { SENDER, RECEIVER, SINGLE };
 enum SynthWaveform {SQUARE, SAW, TRIANGLE, SINE, SUPERSAW, SINEFOLD};
 enum OctaveControlMode {OCTAVE_LOCAL, OCTAVE_OFFSET};

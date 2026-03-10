@@ -1,5 +1,4 @@
 #include <Arduino.h>
-#include <U8g2lib.h>
 #include <bitset>
 #include <STM32FreeRTOS.h>
 #include <Wire.h>
@@ -11,6 +10,7 @@
 #include "ui/Display.h"
 #include "constants.h"
 #include "pins.h"
+#include "io/KeyMatrix.h"
 
 // ================================================= //
 // ==================== Versions =================== //
@@ -54,60 +54,14 @@
 #endif
 
 // ================================================= //
-// ============ Direct Port Manipulation =========== //
-// ================================================= //
-
-#if defined(ARDUINO_ARCH_STM32)
-    // A5 = PA6 (REN_PIN)  <-- FIXED!
-    #define REN_HIGH()  (GPIOA->BSRR = (1 << 6))
-    #define REN_LOW()   (GPIOA->BSRR = (1 << (6 + 16)))
-
-    // D3 = PB0 (RA0_PIN)
-    #define RA0_HIGH()  (GPIOB->BSRR = (1 << 0))
-    #define RA0_LOW()   (GPIOB->BSRR = (1 << (0 + 16)))
-
-    // D6 = PB1 (RA1_PIN)
-    #define RA1_HIGH()  (GPIOB->BSRR = (1 << 1))
-    #define RA1_LOW()   (GPIOB->BSRR = (1 << (1 + 16)))
-
-    // D12 = PB4 (RA2_PIN)
-    #define RA2_HIGH()  (GPIOB->BSRR = (1 << 4))
-    #define RA2_LOW()   (GPIOB->BSRR = (1 << (4 + 16)))
-
-    // D11 = PB5 (OUT_PIN)
-    #define OUT_HIGH()  (GPIOB->BSRR = (1 << 5))
-    #define OUT_LOW()   (GPIOB->BSRR = (1 << (5 + 16)))
-
-    // --- INPUT MASKS (All mapped to Port A) ---
-    // A2 = PA3 (C0_PIN)   <-- FIXED!
-    #define C0_MASK (1 << 3)
-    // D9 = PA8 (C1_PIN)
-    #define C1_MASK (1 << 8)
-    // A6 = PA7 (C2_PIN)   <-- FIXED!
-    #define C2_MASK (1 << 7)
-    // D1 = PA9 (C3_PIN)
-    #define C3_MASK (1 << 9)
-#else
-    // Fallback if compiled for a different board
-    #define REN_HIGH()  (digitalWrite(REN_PIN, HIGH))
-    #define REN_LOW()   (digitalWrite(REN_PIN, LOW))
-    #define RA0_HIGH()  (digitalWrite(RA0_PIN, HIGH))
-    #define RA0_LOW()   (digitalWrite(RA0_PIN, LOW))
-    #define RA1_HIGH()  (digitalWrite(RA1_PIN, HIGH))
-    #define RA1_LOW()   (digitalWrite(RA1_PIN, LOW))
-    #define RA2_HIGH()  (digitalWrite(RA2_PIN, HIGH))
-    #define RA2_LOW()   (digitalWrite(RA2_PIN, LOW))
-    #define OUT_HIGH()  (digitalWrite(OUT_PIN, HIGH))
-    #define OUT_LOW()   (digitalWrite(OUT_PIN, LOW))
-#endif
-
-// ================================================= //
 // ================== Shared State ================= //
 // ================================================= //
 
 SysState sysState;
 
 SemaphoreHandle_t CAN_TX_Semaphore;
+
+KeyMatrix matrix;
 
 //Knobs
 Knob knobs[5] = {
@@ -175,84 +129,7 @@ QueueHandle_t msgOutQ;
         Wire.endTransmission();
     }
 
-    extern "C" uint8_t u8x8_byte_rtos_hw_i2c(u8x8_t *u8x8, uint8_t msg, uint8_t arg_init, void *arg_ptr) {
-        uint8_t *data;
-        switch (msg) {
-            case U8X8_MSG_BYTE_SEND:
-                data = (uint8_t *)arg_ptr;
-                while (arg_init > 0) {
-                    Wire.write((uint8_t)*data);
-                    data++;
-                    arg_init--;
-                }
-                break;
-            case U8X8_MSG_BYTE_INIT:
-                // Wire.begin() already initialised in setup
-                break;
-            case U8X8_MSG_BYTE_SET_DC:
-                // Not used for I2C display
-                break;
-            case U8X8_MSG_BYTE_START_TRANSFER:
-                xSemaphoreTake(i2cMutex, portMAX_DELAY);
-                Wire.beginTransmission(u8x8_GetI2CAddress(u8x8) >> 1);
-                break;
-            case U8X8_MSG_BYTE_END_TRANSFER:
-                Wire.endTransmission();
-                xSemaphoreGive(i2cMutex);
-                break;
-        }
-        return 1;
-    }
-
 #endif
-
-//Function to set outputs using key matrix
-void setOutMuxBit(const uint8_t bitIdx, const bool value) {
-    REN_LOW();
-
-    if (bitIdx & 0x01) RA0_HIGH(); else RA0_LOW();
-    if (bitIdx & 0x02) RA1_HIGH(); else RA1_LOW();
-    if (bitIdx & 0x04) RA2_HIGH(); else RA2_LOW();
-
-    if (value) OUT_HIGH(); else OUT_LOW();
-
-    REN_HIGH();
-    delayMicroseconds(1);
-    REN_LOW();
-}
-
-// Function to read the inputs from the four columns of the switch matrix
-std::bitset<4> readCols() {
-    std::bitset<4> result;
-
-    uint32_t portAState = GPIOA->IDR; // Read entire Port A state
-    result[0] = (portAState & C0_MASK) != 0;
-    result[1] = (portAState & C1_MASK) != 0;
-    result[2] = (portAState & C2_MASK) != 0;
-    result[3] = (portAState & C3_MASK) != 0;
-
-    return result;
-}
-
-void setRow(uint8_t rowIdx){
-    // Set Row Select Enable low
-    REN_LOW();
-
-    // Set Row Select Address low
-    if (rowIdx & 0x01) RA0_HIGH(); else RA0_LOW();
-    if (rowIdx & 0x02) RA1_HIGH(); else RA1_LOW();
-    if (rowIdx & 0x04) RA2_HIGH(); else RA2_LOW();
-
-    #ifdef I2C_EXPANDER_KNOBS 
-        if (rowIdx == 2) OUT_LOW(); else OUT_HIGH();
-    #else
-        OUT_HIGH();
-    #endif
-
-    // Set Row Select Enable High
-    REN_HIGH();
-    delayMicroseconds(1);
-}
 
 // ================================================= //
 // ========= Interrupt Subroutine Helpers ===-====== //
@@ -630,33 +507,6 @@ void handleSwitches(bool volumePressed, bool wavePressed, bool octavePressed) {
     xSemaphoreGive(sysState.mutex);
 }
 
-void updateSwitchesAndConnections(std::bitset<4> cols, uint8_t rowIdx, bool &westConnected, bool &eastConnected) {
-    if (rowIdx == 5) {
-        westConnected = (cols[3] == 0);
-        #ifdef V1
-            knobs[2].updateSwitch(cols[0]); // C0: Knob 0 S
-            knobs[3].updateSwitch(cols[1]); // C1: Knob 3 S
-        #elifdef V2
-            knobs[0].updateSwitch(cols[0]); // C0: Knob 0 S
-            knobs[3].updateSwitch(cols[1]); // C1: Knob 3 S
-        #endif
-    } else if (rowIdx == 6) {
-        eastConnected = (cols[3] == 0);
-        #ifdef V1
-            knobs[0].updateSwitch(cols[0]); // C0: Knob 1 S
-            knobs[1].updateSwitch(cols[1]); // C1: Knob 2 S
-        #elifdef V2
-            knobs[1].updateSwitch(cols[0]); // C0: Knob 1 S
-            knobs[2].updateSwitch(cols[1]); // C1: Knob 2 S 
-        #endif
-    }
-}
-
-void mapColumnsToSet(std::bitset<32> &localInputs, std::bitset<4> cols, uint8_t rowIdx) {
-    int offset = rowIdx * 4;
-    for (int bit = 0; bit < 4; bit++) localInputs[offset + bit] = cols[bit];
-}
-
 void constructAndSendTXMessage(std::bitset<32> &localInputs, std::bitset<32> &prevInputs, uint8_t keyIdx, std::array<uint8_t, 8> &TX_Message) {
     bool isPressed = (localInputs[keyIdx] == 0);
     bool wasPressed = (prevInputs[keyIdx] == 0);
@@ -813,20 +663,28 @@ void scanKeysTask(void * pvParameters) {
             SynthRole localRole = sysState.role;
             xSemaphoreGive(sysState.mutex);
 
-            // Key scanning loop for Rows 0-2
-            std::bitset<32> localInputs;
-            for (int i = 0; i < 7; i++) { 
-                setRow(i);
-                delayMicroseconds(3);
-                std::bitset<4> cols = readCols();
+            KeyScanResult scanResult = matrix.scan();
+            std::bitset<32> localInputs = scanResult.inputs;
+            westConnected = scanResult.westConnected;
+            eastConnected = scanResult.eastConnected;
 
-                #ifndef I2C_EXPANDER_KNOBS
-                    updateRotations(i, cols, localOctaveMode); 
-                #endif 
+            // Update knob switches from matrix rows 5-6
+            #ifdef V1
+                knobs[2].updateSwitch(scanResult.rowData[5][0]);
+                knobs[3].updateSwitch(scanResult.rowData[5][1]);
+                knobs[0].updateSwitch(scanResult.rowData[6][0]);
+                knobs[1].updateSwitch(scanResult.rowData[6][1]);
+            #elifdef V2
+                knobs[0].updateSwitch(scanResult.rowData[5][0]);
+                knobs[3].updateSwitch(scanResult.rowData[5][1]);
+                knobs[1].updateSwitch(scanResult.rowData[6][0]);
+                knobs[2].updateSwitch(scanResult.rowData[6][1]);
+            #endif
 
-                updateSwitchesAndConnections(cols, i, westConnected, eastConnected);
-                mapColumnsToSet(localInputs, cols, i);
-            }
+            // V1 non-I2C mode: update knob rotations from matrix
+            #ifndef I2C_EXPANDER_KNOBS
+                for (int i = 0; i < 7; i++) updateRotations(i, scanResult.rowData[i], localOctaveMode);
+            #endif
 
             #ifdef PROFILE_SCANKEYS
                 // WCET: Force the worst-case path (RECEIVER role with all keys changing state).
@@ -1047,9 +905,7 @@ void initialiseKnobs() {
     
     #ifndef I2C_EXPANDER_KNOBS
         for (int i = 3; i < 5; i++) {
-            setRow(i);
-            delayMicroseconds(3);
-            std::bitset<4> cols = readCols();
+            std::bitset<4> cols = matrix.scanRow(i);
             
                 #ifdef V1
                     uint8_t knobIndex = (i == 3) ? 3 : 1;
@@ -1166,7 +1022,7 @@ void setup() {
     #endif
 
     //Initialise display
-    initialiseDisplay();
+    display.begin();
 
     //Initialise UART
     Serial.begin(9600);
