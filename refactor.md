@@ -46,15 +46,25 @@ src/
 - `SysState.h` created in `src/` (should move to `include/`) — holds enums
   (`SynthRole`, `SynthWaveform`, `OctaveControlMode`), `DisplayState`, `Sound`,
   and `SysState` struct with `extern SysState sysState`
-- `Display.cpp` / `Display.h` extracted from `main.cpp` into `src/ui/`
-- `main.cpp` — `displayUpdateTask`, `updateDisplayState`, `initialiseDisplay`
-  commented out; `SysState sysState` definition remains
+- `constants.h` created in `include/` — all constants renamed to `UPPER_SNAKE_CASE`;
+  `SAMPLING_RATE`, `PHASE_MODULUS`, `MAX_VOICES` per spec; `KnobIndex` enum class;
+  `constexpr` throughout (no `extern const` bugs)
+- `pins.h` created in `include/` — pure pin + mux bit constants only (`constexpr`);
+  object definitions (`u8g2`, `sampleTimer`, `msgInQ/Out`) moved to owning modules
+- `KeyMatrix` class extracted to `src/io/KeyMatrix.h` / `KeyMatrix.cpp` —
+  GPIO macros, `selectRow`, `readColumns`, `scan()` (returns `KeyScanResult`),
+  `scanRow()`, and `setOutMuxBit` all live here; `main.cpp` scan loop replaced
+  with `matrix.scan()`
+- `Display` class extracted to `src/ui/Display.h` / `Display.cpp` —
+  `u8g2_` is a member; `begin()`, `update()`, `updateState()`, `stateChanged()`
+  are methods; `display` global defined in `Display.cpp`; `displayUpdateTask`
+  is a thin RTOS-loop wrapper around `display.update()`
+- `main.cpp` cleaned of all commented-out blocks; down to ~900 lines
 
 **Remaining in `main.cpp` to extract:**
 - `Synth` module (audio ISR, voice allocation, waveform generation)
-- `KeyMatrix` class (row/col scanning)
-- `KnobManager` (knob array, V1/V2 read logic)
 - `CanProtocol` (encode/decode/validate)
+- Move `SysState.h` from `src/` to `include/`
 
 ---
 
@@ -274,12 +284,12 @@ Apply consistently:
 
 Work in small, independently testable increments:
 
-1. **Extract `constants.h` and `pins.h`** — pure header changes, zero runtime risk
+1. ~~**Extract `constants.h` and `pins.h`**~~ ✅ done
 2. **Extract `CanProtocol`** — write `encode`/`decode`/`validate`, swap in `scanKeysTask` + `decodeTask`
-3. **Extract `KeyMatrix` class** — wrap existing GPIO code, keep task logic the same
-4. **Extract `KnobManager`** — consolidate V1/V2 knob reads
+3. ~~**Extract `KeyMatrix` class**~~ ✅ done
+4. ~~**Extract `KnobManager`**~~ ✅ done
 5. **Extract `Synth` module** — move ISR logic; test waveform math off-target
-6. **Extract `Display` module** — pure rendering, snapshot pattern
+6. ~~**Extract `Display` module**~~ ✅ done
 7. **Refactor `SysState`** — RAII mutex wrappers last (highest churn)
 8. **Fix `Knob` class** — small isolated changes
 

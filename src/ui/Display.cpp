@@ -2,10 +2,9 @@
 #include <U8g2lib.h>
 #include <Wire.h>
 #include "Display.h"
-#include "Knob.h"
 #include "constants.h"
 #include "pins.h"
-#include "io/KeyMatrix.h"
+#include "io/KnobManager.h"
 
 Display display;
 
@@ -14,7 +13,6 @@ Display display;
 // ================================================= //
 
 #ifdef I2C_EXPANDER_KNOBS
-extern SemaphoreHandle_t i2cMutex;
 
 extern "C" uint8_t u8x8_byte_rtos_hw_i2c(u8x8_t *u8x8, uint8_t msg, uint8_t arg_init, void *arg_ptr) {
     uint8_t *data;
@@ -34,12 +32,12 @@ extern "C" uint8_t u8x8_byte_rtos_hw_i2c(u8x8_t *u8x8, uint8_t msg, uint8_t arg_
             // Not used for I2C display
             break;
         case U8X8_MSG_BYTE_START_TRANSFER:
-            xSemaphoreTake(i2cMutex, portMAX_DELAY);
+            xSemaphoreTake(knobManager.i2cMutex, portMAX_DELAY);
             Wire.beginTransmission(u8x8_GetI2CAddress(u8x8) >> 1);
             break;
         case U8X8_MSG_BYTE_END_TRANSFER:
             Wire.endTransmission();
-            xSemaphoreGive(i2cMutex);
+            xSemaphoreGive(knobManager.i2cMutex);
             break;
     }
     return 1;
@@ -51,7 +49,6 @@ extern "C" uint8_t u8x8_byte_rtos_hw_i2c(u8x8_t *u8x8, uint8_t msg, uint8_t arg_
 // ================================================= //
 
 extern volatile struct Sound sounds[];
-extern Knob knobs[];
 
 // ================================================= //
 // ================ Display private ================ //
@@ -71,10 +68,10 @@ void Display::updateState() {
     }
 
     xSemaphoreTake(sysState.mutex, portMAX_DELAY);
-    sysState.displayState.waveform    = knobs[waveIdx].getValue();
-    sysState.displayState.volume      = knobs[volumeIdx].getValue();
-    sysState.displayState.pitch       = knobs[pitchIdx].getValue();
-    sysState.displayState.octave      = knobs[displayOctaveIdx].getValue();
+    sysState.displayState.waveform    = knobManager.knobs[waveIdx].getValue();
+    sysState.displayState.volume      = knobManager.knobs[volumeIdx].getValue();
+    sysState.displayState.pitch       = knobManager.knobs[pitchIdx].getValue();
+    sysState.displayState.octave      = knobManager.knobs[displayOctaveIdx].getValue();
     sysState.displayState.role        = sysState.role;
     sysState.displayState.octaveMode  = sysState.octaveMode;
     sysState.displayState.activeNotes = activeNotes;
