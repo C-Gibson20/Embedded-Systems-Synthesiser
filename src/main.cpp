@@ -19,7 +19,7 @@
 // =================== Profiling =================== //
 // ================================================= //
 
-// #define PROFILING_MODE  
+// #define PROFILING_MODE
 #ifdef PROFILING_MODE
     #define DISABLE_THREADS
     #define DISABLE_ISRS
@@ -33,10 +33,10 @@
     #define PROFILE_CAN_RX_ISR
     #define PROFILE_CAN_TX_ISR
 
-    #ifdef I2C_EXPANDER_KNOBS
-        #define PROFILE_KNOB
-        #define PROFILE_KNOB_ISR
-    #endif
+    // #ifdef I2C_EXPANDER_KNOBS
+    //     #define PROFILE_KNOB
+    //     #define PROFILE_KNOB_ISR
+    // #endif
 #endif
 
 // ================================================= //
@@ -162,6 +162,13 @@ void constructAndSendTXMessage(std::bitset<32> &localInputs, std::bitset<32> &pr
 // ================================================= //
 // ===================== Tasks ===================== //
 // ================================================= //
+
+void sampleGenTask(void* pvParameters) {
+    while (1) {
+        xSemaphoreTake(synth.sampleBufferSemaphore, portMAX_DELAY);
+        synth.fillBuffer();
+    }
+}
 
 void scanKeysTask(void * pvParameters) {
     const TickType_t xFrequency = SCAN_INTERVAL/portTICK_PERIOD_MS;
@@ -383,11 +390,12 @@ void initialiseThreads() {
             TaskHandle_t knobHandle = NULL;
             xTaskCreate(knobTask, "knobTask", 256, NULL, 2, &knobHandle);
         #endif
-
+        TaskHandle_t sampleGenHandle = NULL;
         TaskHandle_t scanKeysHandle = NULL;
         TaskHandle_t decodeHandle = NULL;
         TaskHandle_t displayUpdateHandle = NULL;
         TaskHandle_t canTxHandle = NULL;
+        xTaskCreate(sampleGenTask, "sampleGen", 256, NULL, 3, &sampleGenHandle);
         xTaskCreate(scanKeysTask, "scanKeys", 256, NULL, 3, &scanKeysHandle);
         xTaskCreate(displayUpdateTask, "displayUpdate", 256, NULL, 1, &displayUpdateHandle);
         xTaskCreate(decodeTask, "decode", 256, NULL, 2, &decodeHandle);

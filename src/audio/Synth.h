@@ -32,10 +32,19 @@ struct GlobalParameters {
 
 class Synth {
 public:
+    static constexpr uint32_t BUFFER_SIZE = 64;
+
+    uint8_t sampleBuffer0[BUFFER_SIZE];
+    uint8_t sampleBuffer1[BUFFER_SIZE];
+    volatile bool writeBuffer1 = false;
+    volatile uint32_t readCtr = 0;
+    SemaphoreHandle_t sampleBufferSemaphore;
+
     volatile Sound sounds[MAX_VOICES];
 
     void begin();
     void processCommands();
+    void fillBuffer();
     uint32_t tick();
 
     void pushNoteOn(uint8_t key, uint8_t volume, int32_t pitch, int waveform, bool remote, uint8_t octave);

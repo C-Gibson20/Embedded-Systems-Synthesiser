@@ -78,6 +78,11 @@ void Synth::begin() {
     }
     freeTop_ = MAX_VOICES;
 
+    sampleBufferSemaphore = xSemaphoreCreateBinary();
+    xSemaphoreGive(sampleBufferSemaphore);       
+    memset(sampleBuffer0, 128, BUFFER_SIZE);       
+    memset(sampleBuffer1, 128, BUFFER_SIZE);
+    
     sampleTimer_.setOverflow(22000, HERTZ_FORMAT);
     #ifndef DISABLE_ISRS
         sampleTimer_.attachInterrupt(sampleISR);
@@ -154,6 +159,16 @@ void Synth::processCommands() {
                 break;
             }
         }
+    }
+}
+
+void Synth::fillBuffer() {
+    processCommands();
+    
+    uint8_t* buf = writeBuffer1 ? sampleBuffer1 : sampleBuffer0;
+    
+    for (uint32_t i = 0; i < BUFFER_SIZE; i++) {
+        buf[i] = tick();
     }
 }
 
@@ -278,6 +293,14 @@ void Synth::resetCommandQueue() {
 // ================================================= //
 
 void sampleISR() {
-    synth.processCommands();
-    analogWrite(OUTR_PIN, synth.tick());
+    if (synth.readCtr == Synth::BUFFER_SIZE) {
+        synth.readCtr = 0;
+        synth.writeBuffer1 = !synth.writeBuffer1;
+        xSemaphoreGiveFromISR(synth.sampleBufferSemaphore, NULL);
+    }
+
+    if (synth.writeBuffer1)
+        analogWrite(OUTR_PIN, synth.sampleBuffer0[synth.readCtr++]);
+    else
+        analogWrite(OUTR_PIN, synth.sampleBuffer1[synth.readCtr++]);
 }
