@@ -1,10 +1,6 @@
 #include <Arduino.h>
 #include <bitset>
 #include <STM32FreeRTOS.h>
-#include <Wire.h>
-#include <ES_CAN.h>
-#include <bits/stdc++.h>
-#include "Knob.h"
 #include "SysState.h"
 #include "ui/Display.h"
 #include "constants.h"
@@ -130,7 +126,6 @@ void scanKeysTask(void * pvParameters) {
     static uint8_t lastOctave;
     static bool westConnected = false;
     static bool eastConnected = false;
-    static int8_t keyToSound[12] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
 
     #ifndef DISABLE_THREADS
         while (1) {
@@ -273,6 +268,7 @@ void initialiseThreads() {
     #endif
 }
 
+#ifdef PROFILING_MODE
 void printAverageTime(const char* taskName, uint32_t totalTime, int iterations) {
     Serial.print(taskName);
     Serial.print(" Average WCET: ");
@@ -311,6 +307,7 @@ void profileISR(void (*isrFunction)(void), const char* taskName, const int itera
 
     printAverageTime(taskName, totalTime, iterations);
 }
+#endif // PROFILING_MODE
 
 // ================================================= //
 // ===================== Setup ===================== //
