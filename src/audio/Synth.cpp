@@ -3,9 +3,110 @@
 #include "pins.h"
 #include <STM32FreeRTOS.h>
 
+DAC_HandleTypeDef hdac1;
+TIM_HandleTypeDef htim;
+DMA_HandleTypeDef hdma_dac_ch1;
+
 Synth synth;
 
-static HardwareTimer sampleTimer_(TIM1);
+static void MX_DAC1_Init(void)
+{
+    __HAL_RCC_DAC1_CLK_ENABLE();
+    DAC_ChannelConfTypeDef sConfig = {0};
+    hdac1.Instance = DAC1;
+
+    if (HAL_DAC_Init(&hdac1) != HAL_OK)
+    {
+        digitalWrite(LED_BUILTIN, HIGH);  // Stuck here
+        while(1);
+    }
+
+    sConfig.DAC_SampleAndHold = DAC_SAMPLEANDHOLD_DISABLE;
+    sConfig.DAC_Trigger = DAC_TRIGGER_T6_TRGO;
+    sConfig.DAC_OutputBuffer = DAC_OUTPUTBUFFER_ENABLE;
+    sConfig.DAC_ConnectOnChipPeripheral = DAC_CHIPCONNECT_DISABLE;
+    sConfig.DAC_UserTrimming = DAC_TRIMMING_FACTORY;
+    if (HAL_DAC_ConfigChannel(&hdac1, &sConfig, DAC_CHANNEL_1) != HAL_OK)
+    {
+        digitalWrite(LED_BUILTIN, HIGH);  // Stuck here
+        while(1);
+    }
+
+}
+
+extern "C" void DMA1_Channel3_IRQHandler(void) {
+    HAL_DMA_IRQHandler(&hdma_dac_ch1);
+}
+
+static void MX_DMA_Init(void)
+{
+
+    __HAL_RCC_DMA1_CLK_ENABLE();
+
+    hdma_dac_ch1.Instance = DMA1_Channel3;
+    hdma_dac_ch1.Init = {
+        .Request           = DMA_REQUEST_6,
+        .Direction         = DMA_MEMORY_TO_PERIPH,
+        .PeriphInc         = DMA_PINC_DISABLE,
+        .MemInc            = DMA_MINC_ENABLE,
+        .PeriphDataAlignment = DMA_PDATAALIGN_BYTE,
+        .MemDataAlignment  = DMA_MDATAALIGN_BYTE,
+        .Mode              = DMA_CIRCULAR,
+        .Priority          = DMA_PRIORITY_LOW
+    };
+
+    if (HAL_DMA_Init(&hdma_dac_ch1) != HAL_OK) {
+        digitalWrite(LED_BUILTIN, HIGH);  // Stuck here
+        while(1);
+    }
+
+    __HAL_LINKDMA(&hdac1, DMA_Handle1, hdma_dac_ch1);
+
+    HAL_NVIC_SetPriority(DMA1_Channel3_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(DMA1_Channel3_IRQn);
+
+}
+
+static void MX_TIM6_Init(void)
+{
+    __HAL_RCC_TIM6_CLK_ENABLE();
+
+    htim.Instance = TIM6;
+    htim.Init = {
+        .Prescaler = 0,
+        .CounterMode = TIM_COUNTERMODE_UP,
+        .Period = 3635,
+        .AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE
+    };
+
+    if (HAL_TIM_Base_Init(&htim) != HAL_OK) {
+        digitalWrite(LED_BUILTIN, HIGH);  // Stuck here
+        while(1);
+    } 
+    TIM_MasterConfigTypeDef masterConfig = {
+        .MasterOutputTrigger = TIM_TRGO_UPDATE,
+        .MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE
+    };
+
+    HAL_TIMEx_MasterConfigSynchronization(&htim, &masterConfig);
+    HAL_TIM_Base_Start(&htim);
+}
+
+extern "C" void HAL_DAC_ConvHalfCpltCallbackCh1(DAC_HandleTypeDef* hdac) {
+    synth.writeBuffer1 = false;
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    xSemaphoreGiveFromISR(synth.sampleBufferSemaphore, &xHigherPriorityTaskWoken);
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+}
+
+extern "C" void HAL_DAC_ConvCpltCallbackCh1(DAC_HandleTypeDef* hdac) {
+    synth.writeBuffer1 = true;
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    xSemaphoreGiveFromISR(synth.sampleBufferSemaphore, &xHigherPriorityTaskWoken);
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+}
+
+// static HardwareTimer sampleTimer_(TIM1);
 
 // ================================================= //
 // =============== Waveform functions ============== //
@@ -77,18 +178,20 @@ void Synth::begin() {
         sounds[i].phase    = 0;
     }
     freeTop_ = MAX_VOICES;
-
-    analogWrite(OUTR_PIN, 128);
+    
+    // analogWrite(OUTR_PIN, 128);
     sampleBufferSemaphore = xSemaphoreCreateBinary();
     xSemaphoreGive(sampleBufferSemaphore);       
-    memset(sampleBuffer0, 128, BUFFER_SIZE);       
-    memset(sampleBuffer1, 128, BUFFER_SIZE);
+    memset(sampleBuffer, 128, BUFFER_SIZE);       
     
-    sampleTimer_.setOverflow(22000, HERTZ_FORMAT);
-    #ifndef DISABLE_ISRS
-        sampleTimer_.attachInterrupt(sampleISR);
-    #endif
-    sampleTimer_.resume();
+    MX_DMA_Init();   
+    MX_DAC1_Init();  
+    MX_TIM6_Init();
+    // sampleTimer_.setOverflow(22000, HERTZ_FORMAT);
+    // #ifndef DISABLE_ISRS
+    //     sampleTimer_.attachInterrupt(sampleISR);
+    // #endif
+    // sampleTimer_.resume();
 }
 
 void Synth::processCommands() {
@@ -166,10 +269,9 @@ void Synth::processCommands() {
 void Synth::fillBuffer() {
     processCommands();
     
-    uint8_t* buf = writeBuffer1 ? sampleBuffer1 : sampleBuffer0;
-    
-    for (uint32_t i = 0; i < BUFFER_SIZE; i++) {
-        buf[i] = tick();
+    uint32_t start = writeBuffer1 ? BUFFER_SIZE/2 : 0;
+    for (uint32_t i = start; i < (start+BUFFER_SIZE/2); i++) {
+        sampleBuffer[i] = tick();
     }
 }
 
@@ -293,15 +395,15 @@ void Synth::resetCommandQueue() {
 // ==================== ISR ======================== //
 // ================================================= //
 
-void sampleISR() {
-    if (synth.readCtr == Synth::BUFFER_SIZE) {
-        synth.readCtr = 0;
-        synth.writeBuffer1 = !synth.writeBuffer1;
-        xSemaphoreGiveFromISR(synth.sampleBufferSemaphore, NULL);
-    }
+// void sampleISR() {
+//     if (synth.readCtr == Synth::BUFFER_SIZE) {
+//         synth.readCtr = 0;
+//         synth.writeBuffer1 = !synth.writeBuffer1;
+//         xSemaphoreGiveFromISR(synth.sampleBufferSemaphore, NULL);
+//     }
 
-    if (synth.writeBuffer1)
-            DAC1->DHR8R1 = synth.sampleBuffer0[synth.readCtr++];
-        else
-            DAC1->DHR8R1 = synth.sampleBuffer1[synth.readCtr++];
-}
+//     if (synth.writeBuffer1)
+//             DAC1->DHR8R1 = synth.sampleBuffer0[synth.readCtr++];
+//         else
+//             DAC1->DHR8R1 = synth.sampleBuffer1[synth.readCtr++];
+// }

@@ -4,6 +4,10 @@
 #include "SysState.h"
 #include "constants.h"
 
+extern DAC_HandleTypeDef hdac1;
+extern TIM_HandleTypeDef htim;
+extern DMA_HandleTypeDef hdma_dac_ch1;
+
 enum AudioCommandType { NOTE_ON, NOTE_OFF, HOLD_ON, HOLD_OFF, ROLE_CHANGE };
 
 struct AudioCommand {
@@ -33,12 +37,10 @@ struct GlobalParameters {
 
 class Synth {
 public:
-    static constexpr uint32_t BUFFER_SIZE = 64;
+    static constexpr uint32_t BUFFER_SIZE = 64*2;
 
-    uint8_t sampleBuffer0[BUFFER_SIZE];
-    uint8_t sampleBuffer1[BUFFER_SIZE];
+    uint8_t sampleBuffer[BUFFER_SIZE];
     volatile bool writeBuffer1 = false;
-    volatile uint32_t readCtr = 0;
     SemaphoreHandle_t sampleBufferSemaphore;
 
     volatile Sound sounds[MAX_VOICES];
@@ -72,4 +74,4 @@ private:
 };
 
 extern Synth synth;
-void sampleISR();
+// void sampleISR();

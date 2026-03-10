@@ -104,6 +104,11 @@ void handleSwitches(bool volumePressed, bool wavePressed, bool octavePressed) {
 // ================================================= //
 
 void sampleGenTask(void* pvParameters) {
+    HAL_DAC_Start_DMA(&hdac1, DAC_CHANNEL_1, 
+                    (uint32_t*)synth.sampleBuffer, 
+                    Synth::BUFFER_SIZE, 
+                    DAC_ALIGN_8B_R);
+
     #ifndef DISABLE_THREADS
         while (1) {
             xSemaphoreTake(synth.sampleBufferSemaphore, portMAX_DELAY);
@@ -390,7 +395,7 @@ void loop() {
         #endif
 
         #ifdef PROFILE_SAMPLE_ISR
-            profileISR(sampleISR, "sampleISR", iterations, false);
+            // profileISR(sampleISR, "sampleISR", iterations, false);
         #endif
 
         #ifdef PROFILE_CAN_RX_ISR
