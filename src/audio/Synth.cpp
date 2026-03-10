@@ -78,6 +78,7 @@ void Synth::begin() {
     }
     freeTop_ = MAX_VOICES;
 
+    analogWrite(OUTR_PIN, 128);
     sampleBufferSemaphore = xSemaphoreCreateBinary();
     xSemaphoreGive(sampleBufferSemaphore);       
     memset(sampleBuffer0, 128, BUFFER_SIZE);       
@@ -300,7 +301,7 @@ void sampleISR() {
     }
 
     if (synth.writeBuffer1)
-        analogWrite(OUTR_PIN, synth.sampleBuffer0[synth.readCtr++]);
-    else
-        analogWrite(OUTR_PIN, synth.sampleBuffer1[synth.readCtr++]);
+            DAC1->DHR8R1 = synth.sampleBuffer0[synth.readCtr++];
+        else
+            DAC1->DHR8R1 = synth.sampleBuffer1[synth.readCtr++];
 }

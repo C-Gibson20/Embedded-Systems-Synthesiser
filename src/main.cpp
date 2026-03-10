@@ -20,11 +20,11 @@
 // =================== Profiling =================== //
 // ================================================= //
 
-// #define PROFILING_MODE
 #ifdef PROFILING_MODE
     #define DISABLE_THREADS
     #define DISABLE_ISRS
   
+    #define PROFILE_SAMPLEGEN
     #define PROFILE_SCANKEYS
     #define PROFILE_DISPLAY
     #define PROFILE_DECODE
@@ -108,10 +108,14 @@ void handleSwitches(bool volumePressed, bool wavePressed, bool octavePressed) {
 // ================================================= //
 
 void sampleGenTask(void* pvParameters) {
-    while (1) {
-        xSemaphoreTake(synth.sampleBufferSemaphore, portMAX_DELAY);
-        synth.fillBuffer();
-    }
+    #ifndef DISABLE_THREADS
+        while (1) {
+            xSemaphoreTake(synth.sampleBufferSemaphore, portMAX_DELAY);
+    #endif
+            synth.fillBuffer();
+    #ifndef DISABLE_THREADS
+        }
+    #endif
 }
 
 void scanKeysTask(void * pvParameters) {
@@ -261,11 +265,11 @@ void initialiseThreads() {
         TaskHandle_t decodeHandle = NULL;
         TaskHandle_t displayUpdateHandle = NULL;
         TaskHandle_t canTxHandle = NULL;
-        xTaskCreate(sampleGenTask, "sampleGen", 256, NULL, 3, &sampleGenHandle);
+        xTaskCreate(sampleGenTask, "sampleGen", 256, NULL, 4, &sampleGenHandle);
         xTaskCreate(scanKeysTask, "scanKeys", 256, NULL, 3, &scanKeysHandle);
         xTaskCreate(displayUpdateTask, "displayUpdate", 256, NULL, 1, &displayUpdateHandle);
         xTaskCreate(decodeTask, "decode", 256, NULL, 2, &decodeHandle);
-        xTaskCreate(CAN_TX_Task, "canTX", 128, NULL, 4, &canTxHandle);
+        xTaskCreate(CAN_TX_Task, "canTX", 128, NULL, 5, &canTxHandle);
     #endif
 }
 
@@ -352,6 +356,20 @@ void loop() {
     #ifdef PROFILING_MODE
         const int iterations = 32;
 
+        #ifdef PROFILE_SAMPLEGEN
+            // WCET Setup: Force max polyphony
+            for (int i = 0; i < MAX_VOICES; i++) {
+                synth.sounds[i].active   = true;
+                synth.sounds[i].held     = false;
+                synth.sounds[i].remote   = false;
+                synth.sounds[i].waveform = SINEFOLD;
+                synth.sounds[i].key      = i % 12;
+                synth.sounds[i].pitch    = 127;
+                synth.sounds[i].volume   = 0;
+            }
+            profileTask(sampleGenTask, "sampleGenTask");
+        #endif
+        
         #ifdef PROFILE_SCANKEYS
             profileTask(scanKeysTask, "scanKeysTask");
         #endif
@@ -375,17 +393,6 @@ void loop() {
         #endif
 
         #ifdef PROFILE_SAMPLE_ISR
-            // WCET Setup: Force maximum polyphony
-            for (int i = 0; i < MAX_VOICES; i++) {
-                synth.sounds[i].active = true;
-                synth.sounds[i].held = false;
-                synth.sounds[i].remote = false;
-                synth.sounds[i].waveform = SINEFOLD; // Most computationally expensive waveform
-                synth.sounds[i].key = i % 12;
-                synth.sounds[i].pitch = 127;
-                synth.sounds[i].volume = 0;
-            }
-
             profileISR(sampleISR, "sampleISR", iterations, false);
         #endif
 
