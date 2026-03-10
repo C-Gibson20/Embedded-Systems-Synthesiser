@@ -5,25 +5,15 @@
 #include <ES_CAN.h>
 #include <bits/stdc++.h>
 #include "Knob.h"
-#include "sine_lut.h"
 #include "SysState.h"
 #include "ui/Display.h"
 #include "constants.h"
 #include "pins.h"
 #include "io/KeyMatrix.h"
 #include "io/KnobManager.h"
+#include "audio/Synth.h"
 
-// ================================================= //
-// ==================== Versions =================== //
-// ================================================= //
-
-// #define V1
-#define V2
-
-#ifdef V2
-    #define I2C_EXPANDER_KNOBS
-#endif 
-
+// Version flags (V2, I2C_EXPANDER_KNOBS) are set in platformio.ini build_flags.
 
 // ================================================= //
 // =================== Profiling =================== //
@@ -59,249 +49,13 @@ SemaphoreHandle_t CAN_TX_Semaphore;
 
 KeyMatrix matrix;
 
-//Sounds
-enum AudioCommandType {NOTE_ON, NOTE_OFF, HOLD_ON, HOLD_OFF, ROLE_CHANGE}; 
-
-struct GlobalParameters {
-    volatile uint8_t volume;
-    volatile SynthWaveform waveform;
-    volatile uint8_t octave;
-    volatile int32_t pitch;
-    volatile bool hasChanged;
-};
-
-struct AudioCommand {
-    AudioCommandType type;
-    SynthRole newRole;
-    uint8_t key;
-    uint32_t step;
-    uint32_t effectiveStep;
-    uint8_t volume;
-    int32_t pitch;
-    SynthWaveform waveform;
-    bool remote;
-    bool updatePitch;
-    bool updateVolume;
-    bool updateWave;
-    bool updateOctave;
-    int8_t octaveValue;
-};
-
-volatile Sound sounds[MAX_VOICES];
-volatile uint8_t freeSounds[MAX_VOICES];    
-volatile uint8_t freeTop = 0;
-volatile GlobalParameters globalParams;
-
-AudioCommand audioCommandQueue[AUDIO_COMMAND_QUEUE_LENGTH];
-volatile uint8_t audioCommandWriteIdx = 0;
-volatile uint8_t audioCommandReadIdx = 0;
-
-//Hardware Timer
-HardwareTimer sampleTimer(TIM1);
-
 //CAN Bus Communication
 QueueHandle_t msgInQ;
 QueueHandle_t msgOutQ;
 
 // ================================================= //
-// ================ Hardware Helpers =============== //
-// ================================================= //
-
-// ================================================= //
-// ========= Interrupt Subroutine Helpers ===-====== //
-// ================================================= //
-
-uint32_t computeStep(uint8_t key, uint8_t octave) {
-    uint32_t step = STEP_SIZES[key];
-    int8_t shift = octave - 4;
-    if (shift > 0) step <<= shift; 
-    else if (shift < 0) step >>= abs(shift);
-    return step;
-}
-
-int allocateSound() {
-    if (freeTop == 0) return -1; // no free voice
-    freeTop--;
-    return freeSounds[freeTop];
-}
-
-void freeSound(int idx) {
-    if (freeTop < MAX_VOICES) {
-        freeSounds[freeTop] = idx;
-        freeTop++;
-    }
-}
-
-void processAudioCommands() {
-    uint8_t writeIdx = audioCommandWriteIdx;
-    __DMB();
-    while (audioCommandReadIdx != writeIdx) {
-        AudioCommand cmd = audioCommandQueue[audioCommandReadIdx];
-        audioCommandReadIdx = (audioCommandReadIdx + 1) % AUDIO_COMMAND_QUEUE_LENGTH;
-
-        switch (cmd.type) {
-            case NOTE_ON: {
-                int idx = allocateSound();
-                if (idx >= 0) {
-                    sounds[idx].step = cmd.step;
-                    sounds[idx].pitch = cmd.pitch;
-                    sounds[idx].effectiveStep = cmd.effectiveStep;
-                    sounds[idx].phase = 0;
-                    sounds[idx].volume = cmd.volume;
-                    sounds[idx].waveform = cmd.waveform;
-                    sounds[idx].key = cmd.key;
-                    sounds[idx].held = false;
-                    sounds[idx].remote = cmd.remote;
-                    sounds[idx].active = true;
-                }
-                break;
-            }
-            case NOTE_OFF: {
-                for (int i = 0; i < MAX_VOICES; i++) {
-                    if (sounds[i].active && sounds[i].key == cmd.key && sounds[i].remote == cmd.remote && !sounds[i].held) {
-                        sounds[i].active = false;
-                        freeSound(i);
-                    }
-                }
-                break;
-            }
-            case HOLD_ON: {
-                for (int i = 0; i < MAX_VOICES; i++) {
-                    if (sounds[i].active && !sounds[i].remote) sounds[i].held = true;
-                }
-                break;
-            }
-            case HOLD_OFF: {
-                for (int i = 0; i < MAX_VOICES; i++) {
-                    if (sounds[i].held && sounds[i].active) {
-                        sounds[i].active = false;
-                        freeSound(i);
-                    }
-                }
-                break;
-            }
-            case ROLE_CHANGE: {
-                if (cmd.newRole != RECEIVER) {
-                    // Leaving receiver so stop remote voices
-                    for (int i = 0; i < MAX_VOICES; i++) {
-                        if (sounds[i].remote && sounds[i].active) {
-                            sounds[i].active = false;
-                            freeSound(i);
-                        }
-                    }
-                }
-
-                if (cmd.newRole == SENDER) {
-                    // Clear local voices when entering sender
-                    for (int i = 0; i < MAX_VOICES; i++) {
-                        if (!sounds[i].remote && sounds[i].active) {
-                            sounds[i].active = false;
-                            freeSound(i);
-                        }
-                    }
-                }
-
-                break;
-            }
-        }
-    }
-}
-
-static inline uint32_t funcSquare(uint8_t i) { 
-    return (i < 128) ? 255 : 0; 
-}
-
-static inline uint32_t funcSaw(uint8_t i) { 
-    return i; 
-}
-
-static inline uint32_t funcTri(uint8_t i) { 
-    return (i < 128) ? (i << 1) : (511 - (i << 1)); 
-}
-
-static inline uint32_t funcSine(uint8_t i) { 
-    return sineTable[i]; 
-}
-
-static inline uint32_t funcSuperSaw(uint8_t index) {
-    uint8_t saw1 = index;
-    uint8_t saw2 = (index + (index >> 2)) & 0xFF; 
-    return (saw1 + saw2) >> 1;
-}
-
-static inline uint32_t funcSineFold(uint8_t index) {
-    int16_t val = (sineTable[index] - 128) * 2; 
-    if (val > 127) val = 255 - val;             
-    if (val < -128) val = -255 - val;           
-    return val + 128;
-}
-
-// ================================================= //
 // ============= Interrupt Subroutines ============= //
 // ================================================= //
-
-void sampleISR() {
-    processAudioCommands();
-
-    int32_t mixedVout = 0;
-    uint8_t activeNotes = 0;
-    
-    for (int i = 0; i < MAX_VOICES; i++) {
-        volatile Sound &s = sounds[i];
-        if(!s.active) continue;
-
-        s.phase += s.effectiveStep;
-        uint8_t index = s.phase >> 24;
-        uint32_t uncenteredValue;
-        switch (s.waveform) {
-            case SQUARE: {
-                uncenteredValue = funcSquare(index);   
-                break;
-            }
-            case SAW: {
-                uncenteredValue = funcSaw(index);      
-                break;
-            }
-            case TRIANGLE: {
-                uncenteredValue = funcTri(index);      
-                break;
-            }
-            case SINE: {
-                uncenteredValue = funcSine(index);     
-                break;
-            }   
-            case SUPERSAW: {   
-                uncenteredValue = funcSuperSaw(index); 
-                break;
-            }
-            case SINEFOLD: {   
-                uncenteredValue = funcSineFold(index); 
-                break;
-            }
-            default: {         
-                uncenteredValue = 128;                   
-                break;
-            }
-        }
-
-        int32_t noteVout = (int32_t)(uncenteredValue) - 128;
-        noteVout >>= (8 - s.volume); // Apply volume control
-        mixedVout += noteVout;
-        activeNotes++;
-    }
-
-    if (activeNotes == 0) {
-        analogWrite(OUTR_PIN, 128);
-        return;
-    }
-
-    static const uint16_t invGain[] = {0, 256/1, 256/2, 256/3, 256/4, 256/5, 256/6, 256/7, 256/8, 256/9, 256/10, 256/11, 256/12, 256/13, 256/14, 256/15, 256/16};
-    if (activeNotes > 1) {
-        mixedVout = (mixedVout * invGain[activeNotes]) >> 8;
-    }
-
-    analogWrite(OUTR_PIN, mixedVout + 128);
-}
 
 void CAN_RX_ISR (void) {
     std::array<uint8_t, 8> RX_Message_ISR;
@@ -330,59 +84,6 @@ void CAN_TX_ISR (void) {
 // ================== Task Helpers ================= //
 // ================================================= //
 
-void pushAudioCommand(const AudioCommand &audioCmd) {
-    // Enter critical section: No other task or ISR can interrupt this block
-    taskENTER_CRITICAL();
-
-    uint8_t nextWriteIdx = (audioCommandWriteIdx + 1) % AUDIO_COMMAND_QUEUE_LENGTH;
-    
-    if (nextWriteIdx != audioCommandReadIdx) {
-        audioCommandQueue[audioCommandWriteIdx] = audioCmd;
-        __DMB();  // Ensure command is fully written before updating index
-        audioCommandWriteIdx = nextWriteIdx;
-    }
-
-    // Exit critical section: Normal scheduling resumes
-    taskEXIT_CRITICAL();
-}
-
-void pushRoleChangeCommand(SynthRole newRole) {
-    AudioCommand cmd;
-    cmd.type = ROLE_CHANGE;
-    cmd.newRole = newRole;
-    pushAudioCommand(cmd);
-}
-
-void pushHoldCommand(AudioCommandType hold_type) {
-    AudioCommand cmd;
-    cmd.type = hold_type;
-    pushAudioCommand(cmd);
-}
-
-void pushNoteOnCommand(uint8_t key, uint8_t volume, int32_t pitch, int waveform, bool remote, uint8_t octave) {
-    uint32_t baseStep = computeStep(key, octave);
-    int32_t offset = (baseStep * (pitch >> 2)) >> 6;
-
-    AudioCommand cmd;
-    cmd.type = NOTE_ON;
-    cmd.key = key;
-    cmd.step = computeStep(key, octave);
-    cmd.volume = volume;
-    cmd.pitch = pitch;
-    cmd.waveform = (SynthWaveform)waveform;
-    cmd.remote = remote;
-    cmd.effectiveStep = baseStep + offset;
-    pushAudioCommand(cmd);
-}
-
-void pushNoteOffCommand(uint8_t key, bool remote) {
-    AudioCommand cmd;
-    cmd.type = NOTE_OFF;
-    cmd.key = key;
-    cmd.remote = remote;
-    pushAudioCommand(cmd);
-}
-
 void handleSynthRole(SynthRole &localRole, bool westConnected, bool eastConnected, bool pitchPressed) {
     static SynthRole lastRole = SINGLE;
     static bool overwrittenAutoConfig = false;
@@ -405,7 +106,7 @@ void handleSynthRole(SynthRole &localRole, bool westConnected, bool eastConnecte
 
     // role = RECEIVER; // Force receiver for testing
 
-    if (localRole != lastRole) pushRoleChangeCommand(localRole);
+    if (localRole != lastRole) synth.pushRoleChange(localRole);
     lastRole = localRole;
 }
 
@@ -418,12 +119,12 @@ void handleSwitches(bool volumePressed, bool wavePressed, bool octavePressed) {
 
     if (volumePressed) {
         localHold = true;
-        pushHoldCommand(HOLD_ON);
+        synth.pushHold(HOLD_ON);
     }
 
     if (wavePressed) {
         localHold = false;
-        pushHoldCommand(HOLD_OFF);
+        synth.pushHold(HOLD_OFF);
     }
 
     if (octavePressed && localRole == RECEIVER) localOctaveMode = (localOctaveMode == OCTAVE_LOCAL) ? OCTAVE_OFFSET : OCTAVE_LOCAL;
@@ -456,41 +157,6 @@ void constructAndSendTXMessage(std::bitset<32> &localInputs, std::bitset<32> &pr
         sysState.TX_Message = TX_Message;
         xSemaphoreGive(sysState.mutex);
     }
-}
-
-void applyGlobalParamUpdates() {
-    uint8_t currentVol = globalParams.volume;
-    SynthWaveform currentWave = globalParams.waveform;
-    uint8_t currentOctave = globalParams.octave;
-    int32_t currentPitch = globalParams.pitch;
-
-    for (int i = 0; i < MAX_VOICES; i++) {
-        if (sounds[i].active && !sounds[i].held && !sounds[i].remote) {
-            sounds[i].volume = currentVol;
-            sounds[i].waveform = currentWave;
-            sounds[i].pitch = currentPitch;   
-
-            uint32_t baseStep = computeStep(sounds[i].key, currentOctave);
-            int32_t offset = (baseStep * (currentPitch >> 2)) >> 6;
-            sounds[i].effectiveStep = baseStep + offset;
-        }
-    }
-}
-
-void updateGlobalParams(uint32_t &lastPitch, uint8_t &lastVolume, uint8_t &lastWaveform, uint8_t &lastOctave, uint32_t pitch, uint8_t volume, uint8_t waveform, uint8_t octave) {
-    lastPitch = pitch;
-    lastVolume = volume;
-    lastWaveform = waveform;
-    lastOctave = octave;
-
-    globalParams.pitch = pitch;
-    globalParams.volume = volume;
-    globalParams.waveform = (SynthWaveform)waveform;    
-    globalParams.octave = octave;
-
-    __DMB(); // Ensure all parameter updates are visible before setting hasChanged
-
-    globalParams.hasChanged = true;
 }
 
 // ================================================= //
@@ -561,15 +227,14 @@ void scanKeysTask(void * pvParameters) {
 
                 // Ensure all sounds are "active" for WCET applyGlobalParamUpdates() 
                 for (int i = 0; i < MAX_VOICES; i++) {
-                    sounds[i].active = true;
-                    sounds[i].held = false;
-                    sounds[i].remote = false;
+                    synth.sounds[i].active = true;
+                    synth.sounds[i].held = false;
+                    synth.sounds[i].remote = false;
                 }
                 
                 // Clear queues so they don't overflow during the 32 iterations
                 xQueueReset(msgOutQ);
-                audioCommandWriteIdx = 0;
-                audioCommandReadIdx = 0;
+                synth.resetCommandQueue();
             #else
         
                 handleSwitches(knobManager.knobs[volumeIdx].isPressed(), knobManager.knobs[waveIdx].isPressed(), knobManager.knobs[octaveIdx].isPressed());
@@ -585,8 +250,8 @@ void scanKeysTask(void * pvParameters) {
                         bool isPressed = (localInputs[i] == 0);
                         bool wasPressed = (prevInputs[i] == 0);
 
-                        if (isPressed && !wasPressed) pushNoteOnCommand(i, knobManager.knobs[volumeIdx].getValue(), knobManager.knobs[pitchIdx].getValue(), knobManager.knobs[waveIdx].getValue(), false, knobManager.knobs[octaveIdx].getValue());
-                        else if (!isPressed && wasPressed) pushNoteOffCommand(i, false);                
+                        if (isPressed && !wasPressed) synth.pushNoteOn(i, knobManager.knobs[volumeIdx].getValue(), knobManager.knobs[pitchIdx].getValue(), knobManager.knobs[waveIdx].getValue(), false, knobManager.knobs[octaveIdx].getValue());
+                        else if (!isPressed && wasPressed) synth.pushNoteOff(i, false);                
                     }
                 }
 
@@ -596,8 +261,8 @@ void scanKeysTask(void * pvParameters) {
                 uint8_t octave = knobManager.knobs[octaveIdx].getValue();
 
                 if (pitch != lastPitch || volume != lastVolume || waveform != lastWaveform || octave != lastOctave) {
-                    updateGlobalParams(lastPitch, lastVolume, lastWaveform, lastOctave, pitch, volume, waveform, octave);
-                    applyGlobalParamUpdates();
+                    synth.updateGlobalParams(lastPitch, lastVolume, lastWaveform, lastOctave, pitch, volume, waveform, octave);
+                    synth.applyGlobalParamUpdates();
                 }
             #endif
         
@@ -632,7 +297,7 @@ void decodeTask(void * pvParameters) {
                 // WCET: Force the worst-case path (RECEIVER role processing a NOTE_ON)
                 // This forces math (computeStep), clamping, array lookups, and critical section queue pushing.
                 uint8_t key = localRX[1];
-                pushNoteOnCommand(key, localRX[5], localRX[2], (SynthWaveform)localRX[3], true, std::clamp(localRX[4] + knobManager.knobs[octaveOffsetIdx].getValue(), 0, 8)); 
+                synth.pushNoteOn(key, localRX[5], localRX[2], (SynthWaveform)localRX[3], true, std::clamp(localRX[4] + knobManager.knobs[octaveOffsetIdx].getValue(), 0, 8)); 
                 
                 xSemaphoreTake(sysState.mutex, portMAX_DELAY);
                 sysState.RX_Message = localRX;
@@ -640,8 +305,8 @@ void decodeTask(void * pvParameters) {
             #else
                 if (localRole == RECEIVER) {
                     uint8_t key = localRX[1];
-                    if (localRX[0] == 'P') pushNoteOnCommand(key, localRX[5], localRX[2], (SynthWaveform)localRX[3], true, std::clamp(localRX[4] + knobManager.knobs[octaveOffsetIdx].getValue(), 0, 8)); // Sender octave plus receiver's octave offset, clamped to valid range                
-                    else if (localRX[0] == 'R') pushNoteOffCommand(key, true);
+                    if (localRX[0] == 'P') synth.pushNoteOn(key, localRX[5], localRX[2], (SynthWaveform)localRX[3], true, std::clamp(localRX[4] + knobManager.knobs[octaveOffsetIdx].getValue(), 0, 8)); // Sender octave plus receiver's octave offset, clamped to valid range                
+                    else if (localRX[0] == 'R') synth.pushNoteOff(key, true);
 
                     xSemaphoreTake(sysState.mutex, portMAX_DELAY);
                     sysState.RX_Message = localRX;
@@ -712,16 +377,6 @@ void initialiseCANBus() {
     CAN_TX_Semaphore = xSemaphoreCreateCounting(3,3);
 }
 
-void initialiseHardwareTimer() {
-    sampleTimer.setOverflow(22000, HERTZ_FORMAT);
-
-    #ifndef DISABLE_ISRS
-        sampleTimer.attachInterrupt(sampleISR);
-    #endif
-
-    sampleTimer.resume();
-}
-
 void initialiseThreads() {
     #ifndef DISABLE_THREADS
         #ifdef I2C_EXPANDER_KNOBS
@@ -738,17 +393,6 @@ void initialiseThreads() {
         xTaskCreate(decodeTask, "decode", 256, NULL, 2, &decodeHandle);
         xTaskCreate(CAN_TX_Task, "canTX", 128, NULL, 4, &canTxHandle);
     #endif
-}
-
-void initialiseSoundAllocator() {
-    for (uint8_t i = 0; i < MAX_VOICES; i++) {
-        freeSounds[i] = i;
-        sounds[i].active = false;
-        sounds[i].waveform = SQUARE;
-        sounds[i].volume = 0;
-        sounds[i].phase = 0;
-    }
-    freeTop = MAX_VOICES;
 }
 
 void printAverageTime(const char* taskName, uint32_t totalTime, int iterations) {
@@ -814,11 +458,8 @@ void setup() {
     //Initialise CAN bus
     initialiseCANBus();
 
-    // Initialize the sounds
-    initialiseSoundAllocator();
-
-    // Initialise hardware timer
-    initialiseHardwareTimer();
+    // Initialise synth (sound allocator + hardware timer)
+    synth.begin();
 
     //Initialise and run threads
     initialiseThreads();
@@ -847,8 +488,7 @@ void loop() {
 
         #ifdef PROFILE_DECODE
             // Reset the audio command queue so pushNoteOnCommand writes to memory instead of skipping because the queue is full.
-            audioCommandWriteIdx = 0;
-            audioCommandReadIdx = 0;
+            synth.resetCommandQueue();
             profileTask(decodeTask, "decodeTask");
         #endif
 
@@ -863,13 +503,13 @@ void loop() {
         #ifdef PROFILE_SAMPLE_ISR
             // WCET Setup: Force maximum polyphony
             for (int i = 0; i < MAX_VOICES; i++) {
-                sounds[i].active = true;
-                sounds[i].held = false;
-                sounds[i].remote = false;
-                sounds[i].waveform = SINEFOLD; // Most computationally expensive waveform
-                sounds[i].key = i % 12;
-                sounds[i].pitch = 127;
-                sounds[i].volume = 0; 
+                synth.sounds[i].active = true;
+                synth.sounds[i].held = false;
+                synth.sounds[i].remote = false;
+                synth.sounds[i].waveform = SINEFOLD; // Most computationally expensive waveform
+                synth.sounds[i].key = i % 12;
+                synth.sounds[i].pitch = 127;
+                synth.sounds[i].volume = 0;
             }
 
             profileISR(sampleISR, "sampleISR", iterations, false);

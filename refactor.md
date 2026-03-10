@@ -62,7 +62,6 @@ src/
 - `main.cpp` cleaned of all commented-out blocks; down to ~900 lines
 
 **Remaining in `main.cpp` to extract:**
-- `Synth` module (audio ISR, voice allocation, waveform generation)
 - `CanProtocol` (encode/decode/validate)
 - Move `SysState.h` from `src/` to `include/`
 
@@ -288,7 +287,7 @@ Work in small, independently testable increments:
 2. **Extract `CanProtocol`** — write `encode`/`decode`/`validate`, swap in `scanKeysTask` + `decodeTask`
 3. ~~**Extract `KeyMatrix` class**~~ ✅ done
 4. ~~**Extract `KnobManager`**~~ ✅ done
-5. **Extract `Synth` module** — move ISR logic; test waveform math off-target
+5. ~~**Extract `Synth` module**~~ ✅ done
 6. ~~**Extract `Display` module**~~ ✅ done
 7. **Refactor `SysState`** — RAII mutex wrappers last (highest churn)
 8. **Fix `Knob` class** — small isolated changes

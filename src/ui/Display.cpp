@@ -5,6 +5,7 @@
 #include "constants.h"
 #include "pins.h"
 #include "io/KnobManager.h"
+#include "audio/Synth.h"
 
 Display display;
 
@@ -48,8 +49,6 @@ extern "C" uint8_t u8x8_byte_rtos_hw_i2c(u8x8_t *u8x8, uint8_t msg, uint8_t arg_
 // ================ External state ================= //
 // ================================================= //
 
-extern volatile struct Sound sounds[];
-
 // ================================================= //
 // ================ Display private ================ //
 // ================================================= //
@@ -64,7 +63,7 @@ void Display::updateState() {
     // Fix: read inside a critical section or maintain an ISR-safe active-notes bitmask.
     uint16_t activeNotes = 0;
     for (int i = 0; i < MAX_VOICES; i++) {
-        if (sounds[i].active) activeNotes |= (1 << sounds[i].key);
+        if (synth.sounds[i].active) activeNotes |= (1 << synth.sounds[i].key);
     }
 
     xSemaphoreTake(sysState.mutex, portMAX_DELAY);

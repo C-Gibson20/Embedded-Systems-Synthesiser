@@ -6,6 +6,7 @@
 #include "Knob.h"
 #include "SysState.h"
 #include "constants.h"
+#include "pins.h"
 #include "KeyMatrix.h"
 
 class KnobManager {
