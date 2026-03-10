@@ -1,7 +1,7 @@
 #pragma once
 
 // Comment out to disable profiling mode
-#define PROFILING_MODE
+// #define PROFILING_MODE
 
 #ifdef PROFILING_MODE
     #define DISABLE_THREADS
