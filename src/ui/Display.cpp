@@ -3,23 +3,15 @@
 #include <Wire.h>
 #include "Display.h"
 #include "Knob.h"
+#include "constants.h"
+#include "pins.h"
+
+U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2(U8G2_R0);
 
 // From main.cpp
 extern volatile struct Sound sounds[];   // needs Sound struct visible — see note below
 extern Knob knobs[];
-extern const uint8_t pitchIdx;
-extern const uint8_t waveIdx;
-extern const uint8_t volumeIdx;
-extern const uint8_t octaveIdx;
-extern const uint8_t octaveOffsetIdx;
-extern const int MAX_SOUNDS;
-extern const uint32_t displayInterval;
-extern const char* noteNames[];
-extern const char* waveNames[];
-extern U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2;
 extern void setOutMuxBit(const uint8_t bitIdx, const bool value);
-extern const int DRST_BIT;
-extern const int DEN_BIT;
 
 void updateDisplayState() {
     xSemaphoreTake(sysState.mutex, portMAX_DELAY);
@@ -31,7 +23,7 @@ void updateDisplayState() {
     // Fix: read inside a critical section (taskENTER_CRITICAL / taskEXIT_CRITICAL)
     // or maintain a separate ISR-safe active-notes bitmask.
     uint16_t activeNotes = 0;
-    for (int i = 0; i < MAX_SOUNDS; i++) {
+    for (int i = 0; i < MAX_VOICES; i++) {
         if (sounds[i].active) activeNotes |= (1 << sounds[i].key);
     }
 
@@ -60,7 +52,7 @@ bool displayStateChanged(const DisplayState &lastState, const DisplayState &curr
 }
 
 void displayUpdateTask(void * pvParameters) {
-    const TickType_t xFrequency = displayInterval/portTICK_PERIOD_MS;
+    const TickType_t xFrequency = DISPLAY_INTERVAL/portTICK_PERIOD_MS;
     TickType_t xLastWakeTime = xTaskGetTickCount();
 
     static std::array<uint8_t, 8> lastMsg = {0};
@@ -98,7 +90,7 @@ void displayUpdateTask(void * pvParameters) {
             #else
                 u8g2.print("Notes: ");
                 for (int i = 0; i < 12; i++) {
-                    if (displayState.activeNotes & (1 << i)) u8g2.print(noteNames[i]);
+                    if (displayState.activeNotes & (1 << i)) u8g2.print(NOTE_NAMES[i]);
                 }
                 
                 u8g2.setCursor(2, 20);
@@ -106,7 +98,7 @@ void displayUpdateTask(void * pvParameters) {
                 u8g2.print(displayState.pitch);
                 
                 u8g2.print(", W: ");
-                u8g2.print(waveNames[displayState.waveform]);
+                u8g2.print(WAVE_NAMES[displayState.waveform]);
                 
                 u8g2.print((octaveMode == OCTAVE_OFFSET) ? ", O+:" : ", O:");
                 u8g2.print(displayState.octave);

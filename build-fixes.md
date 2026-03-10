@@ -1,37 +1,54 @@
 # Build Fixes
 
-## Status: Linking stage — all compile errors resolved
+---
+
+## 1. `constants.h` — refactor.md compliance issues
+
+### Multiple Definition Bugs
+`extern const` with an initialiser in a header causes linker errors when included in more than one `.cpp`. Affects:
+- `displayInterval`, `pitchIdx`, `waveIdx`, `octaveIdx`, `volumeIdx`, `octaveOffsetIdx`, `MAX_SOUNDS`
+
+**Fix:** Change to `constexpr` (or `inline constexpr` if needed).
+
+### Wrong Constant Names (§2, §11 of refactor.md)
+| Current | Required |
+|---|---|
+| `fs` | `SAMPLING_RATE` (`constexpr double`) |
+| `pow2_32` | `PHASE_MODULUS` (`constexpr uint64_t = 1ULL << 32`) |
+| `MAX_SOUNDS` | `MAX_VOICES` (`constexpr uint8_t`) |
+| `displayInterval` | `DISPLAY_INTERVAL` |
+| `scanInterval` | `SCAN_INTERVAL` |
+| `octave` | `DEFAULT_OCTAVE` (or remove if unused) |
+| `noteNames[]` | `NOTE_NAMES` |
+| `waveNames[]` | `WAVE_NAMES` |
+| `f_notes[]` | `F_NOTES` |
+| `stepSizes[]` | `STEP_SIZES` |
+
+### Knob Indices (§2 of refactor.md)
+Replace the five separate `extern const uint8_t` index variables with:
+```cpp
+enum class KnobIndex : uint8_t { PITCH = 0, WAVEFORM, VOLUME, OCTAVE, MODE };
+```
+
+### Stray Include
+`#include <bitset>` does not belong in `constants.h` — remove it.
 
 ---
 
-## 1. `const` internal linkage — add `extern` to definitions in `main.cpp`
+## 2. `pins.h` — refactor.md compliance issues
 
-`const` variables in C++ have internal linkage by default, so `extern const` in
-`Display.cpp` can't find them at link time. Add `extern` to their definitions in `main.cpp`:
+### Object Definitions in a Header (Multiple Definition Bug)
+`pins.h` defines objects, not just constants. Including it in more than one `.cpp` will cause linker errors. Move each to its owning module:
 
-```cpp
-extern const uint8_t pitchIdx = 0;
-extern const uint8_t waveIdx = 1;
-extern const uint8_t octaveIdx = 2;
-extern const uint8_t volumeIdx = 3;
-extern const uint8_t octaveOffsetIdx = 4;
-extern const int MAX_SOUNDS = 16;
-extern const uint32_t displayInterval = 100;
-extern const int DRST_BIT = 4;
-extern const int DEN_BIT = 3;
-```
+| Definition | Move to |
+|---|---|
+| `U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2(U8G2_R0);` | `src/ui/Display.cpp` |
+| `HardwareTimer sampleTimer(TIM1);` | `src/audio/Synth.cpp` |
+| `QueueHandle_t msgInQ;` / `msgOutQ;` | `src/net/CanProtocol.cpp` or `SysState` |
 
----
+Per `refactor.md` §1, `pins.h` should contain **only** pin definitions and mux bit constants.
 
-## 2. `setOutMuxBit` signature mismatch — fix extern in `Display.cpp`
+### `extern const` Bug
+`extern const int DEN_BIT = 3;` has the same multiple-definition issue as above.
 
-Actual signature in `main.cpp`:
-```cpp
-void setOutMuxBit(const uint8_t bitIdx, const bool value)
-```
-
-Current extern in `Display.cpp` uses `int` instead of `const uint8_t` — linker sees
-them as different symbols. Change the extern declaration in `Display.cpp` to:
-```cpp
-extern void setOutMuxBit(const uint8_t bitIdx, const bool value);
-```
+**Fix:** Change to `constexpr int DEN_BIT = 3;`
