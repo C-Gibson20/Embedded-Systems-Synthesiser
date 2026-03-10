@@ -62,7 +62,6 @@ src/
 - `main.cpp` cleaned of all commented-out blocks; down to ~900 lines
 
 **Remaining in `main.cpp` to extract:**
-- `CanProtocol` (encode/decode/validate)
 - Move `SysState.h` from `src/` to `include/`
 
 ---
@@ -284,7 +283,7 @@ Apply consistently:
 Work in small, independently testable increments:
 
 1. ~~**Extract `constants.h` and `pins.h`**~~ ✅ done
-2. **Extract `CanProtocol`** — write `encode`/`decode`/`validate`, swap in `scanKeysTask` + `decodeTask`
+2. ~~**Extract `CanProtocol`**~~ ✅ done
 3. ~~**Extract `KeyMatrix` class**~~ ✅ done
 4. ~~**Extract `KnobManager`**~~ ✅ done
 5. ~~**Extract `Synth` module**~~ ✅ done

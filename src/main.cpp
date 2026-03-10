@@ -12,6 +12,7 @@
 #include "io/KeyMatrix.h"
 #include "io/KnobManager.h"
 #include "audio/Synth.h"
+#include "net/CanProtocol.h"
 
 // Version flags (V2, I2C_EXPANDER_KNOBS) are set in platformio.ini build_flags.
 
@@ -45,40 +46,7 @@
 
 SysState sysState;
 
-SemaphoreHandle_t CAN_TX_Semaphore;
-
 KeyMatrix matrix;
-
-//CAN Bus Communication
-QueueHandle_t msgInQ;
-QueueHandle_t msgOutQ;
-
-// ================================================= //
-// ============= Interrupt Subroutines ============= //
-// ================================================= //
-
-void CAN_RX_ISR (void) {
-    std::array<uint8_t, 8> RX_Message_ISR;
-    uint32_t ID;
-    #ifdef PROFILING_MODE
-        RX_Message_ISR = {'P', 4, 1, 0, 0, 0, 0, 0}; 
-        ID = 0x123;
-        // Use standard API to prevent RTOS context crashes in main loop
-        xQueueSend(msgInQ, RX_Message_ISR.data(), 0);
-    #else
-        CAN_RX(ID, RX_Message_ISR.data());
-        xQueueSendFromISR(msgInQ, RX_Message_ISR.data(), NULL);
-    #endif
-}
-
-void CAN_TX_ISR (void) {
-	#ifdef PROFILING_MODE
-        // Use standard API to prevent RTOS context crashes in main loop
-        xSemaphoreGive(CAN_TX_Semaphore);
-    #else
-        xSemaphoreGiveFromISR(CAN_TX_Semaphore, NULL);
-    #endif
-}
 
 // ================================================= //
 // ================== Task Helpers ================= //
@@ -133,30 +101,6 @@ void handleSwitches(bool volumePressed, bool wavePressed, bool octavePressed) {
     sysState.hold = localHold;
     sysState.octaveMode = localOctaveMode;
     xSemaphoreGive(sysState.mutex);
-}
-
-void constructAndSendTXMessage(std::bitset<32> &localInputs, std::bitset<32> &prevInputs, uint8_t keyIdx, std::array<uint8_t, 8> &TX_Message) {
-    bool isPressed = (localInputs[keyIdx] == 0);
-    bool wasPressed = (prevInputs[keyIdx] == 0);
-
-    if (isPressed != wasPressed) {
-        if (isPressed) {
-            TX_Message[0] = 'P';
-            TX_Message[1] = keyIdx;
-            TX_Message[2] = (int8_t)knobManager.knobs[pitchIdx].getValue();
-            TX_Message[3] = knobManager.knobs[waveIdx].getValue();
-            TX_Message[4] = knobManager.knobs[octaveIdx].getValue();
-            TX_Message[5] = knobManager.knobs[volumeIdx].getValue();
-        }
-        else {
-            TX_Message[0] = 'R';
-            TX_Message[1] = keyIdx;
-        }
-        xQueueSend(msgOutQ, TX_Message.data(), 0); // If you spam keys this causes deadlocks if set to portMAX_DELAY
-        xSemaphoreTake(sysState.mutex, portMAX_DELAY);
-        sysState.TX_Message = TX_Message;
-        xSemaphoreGive(sysState.mutex);
-    }
 }
 
 // ================================================= //
@@ -240,7 +184,7 @@ void scanKeysTask(void * pvParameters) {
                 }
                 
                 // Clear queues so they don't overflow during the 32 iterations
-                xQueueReset(msgOutQ);
+                xQueueReset(canProtocol.msgOutQ);
                 synth.resetCommandQueue();
             #else
         
@@ -250,22 +194,22 @@ void scanKeysTask(void * pvParameters) {
                 bool isSender = (localRole == SENDER);
                 bool isSingle = (localRole == SINGLE);
 
+                uint32_t pitch   = knobManager.knobs[pitchIdx].getValue();
+                uint8_t  volume  = knobManager.knobs[volumeIdx].getValue();
+                uint8_t  waveform = knobManager.knobs[waveIdx].getValue();
+                uint8_t  octave  = knobManager.knobs[octaveIdx].getValue();
+
                 for (int i = 0; i < 12; i++) {
-                    if (!isSingle) constructAndSendTXMessage(localInputs, prevInputs, i, TX_Message);
-                    
+                    if (!isSingle) canProtocol.handleKeyChange(localInputs, prevInputs, i, TX_Message, (int8_t)pitch, waveform, octave, volume);
+
                     if (!isSender) {
-                        bool isPressed = (localInputs[i] == 0);
+                        bool isPressed  = (localInputs[i] == 0);
                         bool wasPressed = (prevInputs[i] == 0);
 
-                        if (isPressed && !wasPressed) synth.pushNoteOn(i, knobManager.knobs[volumeIdx].getValue(), knobManager.knobs[pitchIdx].getValue(), knobManager.knobs[waveIdx].getValue(), false, knobManager.knobs[octaveIdx].getValue());
-                        else if (!isPressed && wasPressed) synth.pushNoteOff(i, false);                
+                        if (isPressed && !wasPressed) synth.pushNoteOn(i, volume, pitch, waveform, false, octave);
+                        else if (!isPressed && wasPressed) synth.pushNoteOff(i, false);
                     }
                 }
-
-                uint32_t pitch = knobManager.knobs[pitchIdx].getValue();
-                uint8_t volume = knobManager.knobs[volumeIdx].getValue();
-                uint8_t waveform = knobManager.knobs[waveIdx].getValue();
-                uint8_t octave = knobManager.knobs[octaveIdx].getValue();
 
                 if (pitch != lastPitch || volume != lastVolume || waveform != lastWaveform || octave != lastOctave) {
                     synth.updateGlobalParams(lastPitch, lastVolume, lastWaveform, lastOctave, pitch, volume, waveform, octave);
@@ -279,62 +223,6 @@ void scanKeysTask(void * pvParameters) {
             sysState.inputs = localInputs;    
             xSemaphoreGive(sysState.mutex);
 
-    #ifndef DISABLE_THREADS
-        }
-    #endif
-}
-
-void decodeTask(void * pvParameters) {
-    #ifndef DISABLE_THREADS
-        std::array<uint8_t, 8> localRX;
-    
-        while (1) {
-            // Block until message available in queue
-            xQueueReceive(msgInQ, localRX.data(), portMAX_DELAY);
-    #else
-        // WCET: Initialize with worst-case payload (Note On, Max Key, Max Pitch, Max Vol)
-        std::array<uint8_t, 8> localRX = {'P', 11, 127, 5, 8, 255, 0, 0};
-    #endif
-
-            xSemaphoreTake(sysState.mutex, portMAX_DELAY);
-            SynthRole localRole = sysState.role;
-            xSemaphoreGive(sysState.mutex);
-
-            #ifdef PROFILE_DECODE
-                // WCET: Force the worst-case path (RECEIVER role processing a NOTE_ON)
-                // This forces math (computeStep), clamping, array lookups, and critical section queue pushing.
-                uint8_t key = localRX[1];
-                synth.pushNoteOn(key, localRX[5], localRX[2], (SynthWaveform)localRX[3], true, std::clamp(localRX[4] + knobManager.knobs[octaveOffsetIdx].getValue(), 0, 8)); 
-                
-                xSemaphoreTake(sysState.mutex, portMAX_DELAY);
-                sysState.RX_Message = localRX;
-                xSemaphoreGive(sysState.mutex);
-            #else
-                if (localRole == RECEIVER) {
-                    uint8_t key = localRX[1];
-                    if (localRX[0] == 'P') synth.pushNoteOn(key, localRX[5], localRX[2], (SynthWaveform)localRX[3], true, std::clamp(localRX[4] + knobManager.knobs[octaveOffsetIdx].getValue(), 0, 8)); // Sender octave plus receiver's octave offset, clamped to valid range                
-                    else if (localRX[0] == 'R') synth.pushNoteOff(key, true);
-
-                    xSemaphoreTake(sysState.mutex, portMAX_DELAY);
-                    sysState.RX_Message = localRX;
-                    xSemaphoreGive(sysState.mutex);
-                }
-            #endif
-    #ifndef DISABLE_THREADS
-    }
-    #endif
-}
-
-void CAN_TX_Task (void * pvParameters) {
-    #ifndef DISABLE_THREADS
-        std::array<uint8_t, 8> msgOut;
-        while (1) {
-            xQueueReceive(msgOutQ, msgOut.data(), portMAX_DELAY);
-            xSemaphoreTake(CAN_TX_Semaphore, portMAX_DELAY);
-    #else
-        std::array<uint8_t, 8> msgOut = {0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55};
-    #endif
-		CAN_TX(0x123, msgOut.data());
     #ifndef DISABLE_THREADS
         }
     #endif
@@ -360,28 +248,6 @@ void setPinDirections() {
     pinMode(C3_PIN, INPUT);
     pinMode(JOYX_PIN, INPUT);
     pinMode(JOYY_PIN, INPUT);
-}
-
-void initialiseCANBus() {
-    #ifdef PROFILING_MODE
-        CAN_Init(true);
-    #else
-        CAN_Init(false);
-    #endif
-    setCANFilter(0x123,0x7ff);
-
-    #ifndef DISABLE_ISRS
-        CAN_RegisterRX_ISR(CAN_RX_ISR);
-        CAN_RegisterTX_ISR(CAN_TX_ISR);
-    #endif
-    
-    CAN_Start();
-
-    msgInQ = xQueueCreate(36, 8);
-    msgOutQ = xQueueCreate(36, 8);
-    // msgOutQ = xQueueCreate(384, 8); // Increased to hold 32 iterations of 12 key messages
-
-    CAN_TX_Semaphore = xSemaphoreCreateCounting(3,3);
 }
 
 void initialiseThreads() {
@@ -464,7 +330,7 @@ void setup() {
     Serial.println("Hello World");
 
     //Initialise CAN bus
-    initialiseCANBus();
+    canProtocol.begin();
 
     // Initialise synth (sound allocator + hardware timer)
     synth.begin();
@@ -524,13 +390,13 @@ void loop() {
         #endif
 
         #ifdef PROFILE_CAN_RX_ISR
-            xQueueReset(msgInQ);
+            xQueueReset(canProtocol.msgInQ);
             profileISR(CAN_RX_ISR, "CAN_RX_ISR");
         #endif
 
         #ifdef PROFILE_CAN_TX_ISR
-            vSemaphoreDelete(CAN_TX_Semaphore);
-            CAN_TX_Semaphore = xSemaphoreCreateCounting(255, 0);
+            vSemaphoreDelete(canProtocol.txSemaphore);
+            canProtocol.txSemaphore = xSemaphoreCreateCounting(255, 0);
             profileISR(CAN_TX_ISR, "CAN_TX_ISR");
         #endif
 
