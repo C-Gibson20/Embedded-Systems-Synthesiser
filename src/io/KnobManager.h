@@ -1,5 +1,6 @@
 #pragma once
 #include <Arduino.h>
+#include "profiling.h"
 #include <Wire.h>
 #include <STM32FreeRTOS.h>
 #include <bitset>

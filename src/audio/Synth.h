@@ -1,5 +1,6 @@
 #pragma once
 #include <Arduino.h>
+#include "profiling.h"
 #include "SysState.h"
 #include "constants.h"
 

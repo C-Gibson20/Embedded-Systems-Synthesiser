@@ -1,5 +1,6 @@
 #pragma once
 #include <Arduino.h>
+#include "profiling.h"
 #include <U8g2lib.h>
 #include <STM32FreeRTOS.h>
 #include <array>
