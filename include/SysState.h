@@ -6,6 +6,7 @@
 enum SynthRole { SENDER, RECEIVER, SINGLE };
 enum SynthWaveform {SQUARE, SAW, TRIANGLE, SINE, SUPERSAW, SINEFOLD};
 enum OctaveControlMode {OCTAVE_LOCAL, OCTAVE_OFFSET};
+enum JoyState { JOY_NEUTRAL, JOY_UP, JOY_DOWN };
 
 struct DisplayState {
     uint8_t waveform;
@@ -40,6 +41,7 @@ struct SysState{
     DisplayState displayState;
     int8_t keyToSound[12] = {-1}; // Maps each key to its active sound index, or -1 if no active sound
     SemaphoreHandle_t mutex;
+    volatile JoyState joyState = JOY_NEUTRAL;
 };
 
 extern SysState sysState;

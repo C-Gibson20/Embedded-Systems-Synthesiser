@@ -6,6 +6,9 @@
 #include "pins.h"
 #include "io/KnobManager.h"
 #include "audio/Synth.h"
+#ifdef DINO_MODE
+    #include "DinoGame.h"
+#endif
 
 Display display;
 
@@ -97,6 +100,10 @@ bool Display::stateChanged(const DisplayState &last, const DisplayState &current
 // ================================================= //
 
 void Display::update() {
+    #ifdef DINO_MODE
+        dinoGame.render(u8g2_);
+        return;
+    #endif
     updateState();
 
     xSemaphoreTake(sysState.mutex, portMAX_DELAY);

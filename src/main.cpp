@@ -9,6 +9,9 @@
 #include "io/KnobManager.h"
 #include "audio/Synth.h"
 #include "net/CanProtocol.h"
+#ifdef DINO_MODE
+    #include "ui/DinoGame.h"
+#endif
 
 // Version flags (V2, I2C_EXPANDER_KNOBS) are set in platformio.ini build_flags.
 
@@ -43,6 +46,9 @@
 SysState sysState;
 
 KeyMatrix matrix;
+#ifdef DINO_MODE
+DinoGame dinogame;
+#endif
 
 // ================================================= //
 // ================== Task Helpers ================= //
@@ -131,6 +137,7 @@ void scanKeysTask(void * pvParameters) {
     static uint8_t lastOctave;
     static bool westConnected = false;
     static bool eastConnected = false;
+    static uint16_t joyY;
 
     #ifndef DISABLE_THREADS
         while (1) {
@@ -146,6 +153,12 @@ void scanKeysTask(void * pvParameters) {
             std::bitset<32> localInputs = scanResult.inputs;
             westConnected = scanResult.westConnected;
             eastConnected = scanResult.eastConnected;
+
+            joyY = analogRead(JOYY_PIN);
+            //joy neutral 456, joydown 862, joy up 116
+            if      (joyY < 300) sysState.joyState = JOY_UP;
+            else if (joyY > 700) sysState.joyState = JOY_DOWN;
+            else                  sysState.joyState = JOY_NEUTRAL;
 
             // Update knob switches from matrix rows 5-6
             #ifdef V1
@@ -232,6 +245,20 @@ void scanKeysTask(void * pvParameters) {
     #endif
 }
 
+#ifdef DINO_MODE
+void dinoTask(void* pvParameters) {
+    const TickType_t xFrequency = 60 / portTICK_PERIOD_MS;
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    dinoGame.begin();
+    while (1) {
+        vTaskDelayUntil(&xLastWakeTime, xFrequency);
+        JoyState joy = sysState.joyState;
+        dinoGame.tick(joy);
+        display.update();
+    }
+}
+#endif
+
 // ================================================= //
 // ============ Setup and Loop Helpers ============= //
 // ================================================= //
@@ -264,10 +291,15 @@ void initialiseThreads() {
         TaskHandle_t scanKeysHandle = NULL;
         TaskHandle_t decodeHandle = NULL;
         TaskHandle_t displayUpdateHandle = NULL;
+        TaskHandle_t dinoHandle = NULL;
         TaskHandle_t canTxHandle = NULL;
         xTaskCreate(sampleGenTask, "sampleGen", 256, NULL, 4, &sampleGenHandle);
         xTaskCreate(scanKeysTask, "scanKeys", 256, NULL, 3, &scanKeysHandle);
-        xTaskCreate(displayUpdateTask, "displayUpdate", 256, NULL, 1, &displayUpdateHandle);
+        #ifdef DINO_MODE
+            xTaskCreate(dinoTask, "dino", 256, NULL, 1, &dinoHandle);
+        #else
+            xTaskCreate(displayUpdateTask, "displayUpdate", 256, NULL, 1, &displayUpdateHandle);
+        #endif
         xTaskCreate(decodeTask, "decode", 256, NULL, 2, &decodeHandle);
         xTaskCreate(CAN_TX_Task, "canTX", 128, NULL, 5, &canTxHandle);
     #endif
