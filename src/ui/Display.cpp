@@ -102,6 +102,7 @@ bool Display::stateChanged(const DisplayState &last, const DisplayState &current
 void Display::update() {
     #ifdef DINO_MODE
         dinoGame.render(u8g2_);
+        digitalToggle(LED_BUILTIN);
         return;
     #endif
     updateState();
