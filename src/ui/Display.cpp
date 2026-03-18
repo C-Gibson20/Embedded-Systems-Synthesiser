@@ -70,7 +70,7 @@ void Display::updateState() {
     }
 
     xSemaphoreTake(sysState.mutex, portMAX_DELAY);
-    sysState.displayState.waveform    = knobManager.knobs[waveIdx].getValue();
+    sysState.displayState.instrument  = knobManager.knobs[waveIdx].getValue();
     sysState.displayState.volume      = knobManager.knobs[volumeIdx].getValue();
     sysState.displayState.pitch       = knobManager.knobs[pitchIdx].getValue();
     sysState.displayState.octave      = knobManager.knobs[displayOctaveIdx].getValue();
@@ -83,7 +83,7 @@ void Display::updateState() {
 bool Display::stateChanged(const DisplayState &last, const DisplayState &current,
                             const std::array<uint8_t, 8> &lastMsg,
                             const std::array<uint8_t, 8> &currentMsg) {
-    if (last.waveform    != current.waveform    ||
+    if (last.instrument  != current.instrument  ||
         last.volume      != current.volume       ||
         last.pitch       != current.pitch        ||
         last.octave      != current.octave       ||
@@ -140,7 +140,7 @@ void Display::update() {
         u8g2_.print(displayState.pitch);
 
         u8g2_.print(", W: ");
-        u8g2_.print(WAVE_NAMES[displayState.waveform]);
+        u8g2_.print(INSTRUMENT_NAMES[displayState.instrument]);
 
         u8g2_.print((octaveMode == OCTAVE_OFFSET) ? ", O+:" : ", O:");
         u8g2_.print(displayState.octave);

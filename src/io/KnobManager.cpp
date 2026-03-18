@@ -13,7 +13,7 @@ KnobManager knobManager;
 
 KnobManager::KnobManager()
     : knobs{Knob(0, -128, 127),   // PITCH
-            Knob(0, 0, 5),         // WAVEFORM
+            Knob(0, 0, 3),         // WAVEFORM
             Knob(4, 0, 8),         // OCTAVE (local)
             Knob(2, 0, 8),         // VOLUME
             Knob(0, -8, 8)}        // MODE (octave offset)

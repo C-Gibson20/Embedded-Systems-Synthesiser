@@ -109,6 +109,35 @@ extern "C" void HAL_DAC_ConvCpltCallbackCh1(DAC_HandleTypeDef* hdac) {
 // static HardwareTimer sampleTimer_(TIM1);
 
 // ================================================= //
+// ============== Instrument presets ============== //
+// ================================================= //
+// ADSR rates are per-sample on a 0-65535 envLevel (22 kHz).
+// rate = 65535 / (22000 * seconds).  sustainLevel = percent * 655.
+struct InstrumentPreset {
+    SynthWaveform waveform;
+    uint16_t attackRate;
+    uint16_t decayRate;
+    uint16_t sustainLevel;
+    uint16_t releaseRate;
+    uint8_t  gain;    // loudness normalisation: (noteVout * gain) >> 7, 128 = unity
+    // Biquad low-pass coefficients in Q1.14 (scale = 16384 = 1.0).
+    // Computed offline as 2nd-order Butterworth LP at the cutoff below.
+    // Formula: w0=2π*f0/Fs, α=sin(w0)/(2Q), b0=b2=(1-cos(w0))/2, b1=1-cos(w0),
+    //          a0=1+α, a1=-2cos(w0), a2=1-α  →  normalise all by a0.
+    int16_t b0, b1, b2; // feedforward
+    int16_t a1, a2;     // feedback (sign convention: y -= a1*y1 + a2*y2)
+};
+
+// ADSR rate = 65535 / (22000 * seconds).  sustainLevel = (percent / 100.0) * 65535.
+//                          wave       atk    dec   sus    rel   gain  b0     b1     b2     a1       a2
+static const InstrumentPreset PRESETS[] = {
+    { SAW,      993,   4,    26214, 10,   170,  2360,  4720,  2360,  -11108,  4160 }, // PIANO   — LP 3500 Hz
+    { SQUARE,   65535, 65535,65535, 65535,80,   16384, 0,     0,     0,       0    }, // MIDI    — identity (no filter)
+    { SUPERSAW, 10,    15,   55705, 10,   245,  939,   1879,  939,   -19951,  7327 }, // VIOLIN  — LP 2000 Hz
+    { SINE,     60,    30,   45875, 15,   255,  3515,  7031,  3515,  -5451,   3131 }, // FLUTE   — LP 4500 Hz
+};
+
+// ================================================= //
 // =============== Waveform functions ============== //
 // ================================================= //
 
@@ -171,13 +200,22 @@ void Synth::pushAudioCommand(const AudioCommand& cmd) {
 
 void Synth::begin() {
     for (uint8_t i = 0; i < MAX_VOICES; i++) {
-        freeSounds_[i] = i;
-        sounds[i].active   = false;
-        sounds[i].waveform = SQUARE;
-        sounds[i].volume   = 0;
-        sounds[i].phase    = 0;
+        freeSounds_[i]         = i;
+        sounds[i].active       = false;
+        sounds[i].instrument   = PIANO;
+        sounds[i].waveform     = PRESETS[PIANO].waveform;
+        sounds[i].volume       = 0;
+        sounds[i].phase        = 0;
+        sounds[i].envPhase     = ENV_ATTACK;
+        sounds[i].envLevel     = 0;
+        sounds[i].attackRate   = PRESETS[PIANO].attackRate;
+        sounds[i].decayRate    = PRESETS[PIANO].decayRate;
+        sounds[i].sustainLevel = PRESETS[PIANO].sustainLevel;
+        sounds[i].releaseRate  = PRESETS[PIANO].releaseRate;
+        sounds[i].gain         = PRESETS[PIANO].gain;
     }
     freeTop_ = MAX_VOICES;
+    bqX1_ = bqX2_ = bqY1_ = bqY2_ = 0;
     
     // analogWrite(OUTR_PIN, 128);
     sampleBufferSemaphore = xSemaphoreCreateBinary();
@@ -205,15 +243,24 @@ void Synth::processCommands() {
             case NOTE_ON: {
                 int idx = allocateSound();
                 if (idx >= 0) {
+                    const InstrumentPreset& p = PRESETS[cmd.instrument];
                     sounds[idx].step          = cmd.step;
                     sounds[idx].pitch         = cmd.pitch;
                     sounds[idx].effectiveStep = cmd.effectiveStep;
                     sounds[idx].phase         = 0;
                     sounds[idx].volume        = cmd.volume;
-                    sounds[idx].waveform      = cmd.waveform;
+                    sounds[idx].instrument    = cmd.instrument;
+                    sounds[idx].waveform      = p.waveform;
+                    sounds[idx].attackRate    = p.attackRate;
+                    sounds[idx].decayRate     = p.decayRate;
+                    sounds[idx].sustainLevel  = p.sustainLevel;
+                    sounds[idx].releaseRate   = p.releaseRate;
+                    sounds[idx].gain          = p.gain;
                     sounds[idx].key           = cmd.key;
                     sounds[idx].held          = false;
                     sounds[idx].remote        = cmd.remote;
+                    sounds[idx].envPhase      = ENV_ATTACK;
+                    sounds[idx].envLevel      = 0;
                     sounds[idx].active        = true;
                 }
                 break;
@@ -222,8 +269,7 @@ void Synth::processCommands() {
                 for (int i = 0; i < MAX_VOICES; i++) {
                     if (sounds[i].active && sounds[i].key == cmd.key &&
                         sounds[i].remote == cmd.remote && !sounds[i].held) {
-                        sounds[i].active = false;
-                        freeSound(i);
+                        sounds[i].envPhase = ENV_RELEASE;
                     }
                 }
                 break;
@@ -237,8 +283,8 @@ void Synth::processCommands() {
             case HOLD_OFF: {
                 for (int i = 0; i < MAX_VOICES; i++) {
                     if (sounds[i].held && sounds[i].active) {
-                        sounds[i].active = false;
-                        freeSound(i);
+                        sounds[i].held     = false;
+                        sounds[i].envPhase = ENV_RELEASE;
                     }
                 }
                 break;
@@ -283,6 +329,36 @@ uint32_t Synth::tick() {
         volatile Sound& s = sounds[i];
         if (!s.active) continue;
 
+        // ADSR envelope state machine
+        switch (s.envPhase) {
+            case ENV_ATTACK:
+                if (s.envLevel + s.attackRate >= 65535) {
+                    s.envLevel = 65535;
+                    s.envPhase = ENV_DECAY;
+                } else {
+                    s.envLevel += s.attackRate;
+                }
+                break;
+            case ENV_DECAY:
+                if (s.envLevel <= s.sustainLevel + s.decayRate) {
+                    s.envLevel = s.sustainLevel;
+                    s.envPhase = ENV_SUSTAIN;
+                } else {
+                    s.envLevel -= s.decayRate;
+                }
+                break;
+            case ENV_SUSTAIN:
+                break;
+            case ENV_RELEASE:
+                if (s.envLevel <= s.releaseRate) {
+                    s.active = false;
+                    freeSound(i);
+                    continue;
+                }
+                s.envLevel -= s.releaseRate;
+                break;
+        }
+
         s.phase += s.effectiveStep;
         uint8_t index = s.phase >> 24;
         uint32_t uncenteredValue;
@@ -298,11 +374,11 @@ uint32_t Synth::tick() {
 
         int32_t noteVout = (int32_t)(uncenteredValue) - 128;
         noteVout >>= (8 - s.volume);
+        noteVout = (noteVout * s.gain) >> 7;                     // loudness normalisation
+        noteVout = (noteVout * (int32_t)(s.envLevel >> 8)) >> 8; // apply envelope
         mixedVout += noteVout;
         activeNotes++;
     }
-
-    if (activeNotes == 0) return 128;
 
     static const uint16_t invGain[] = {
         0, 256/1, 256/2, 256/3, 256/4, 256/5, 256/6, 256/7, 256/8,
@@ -311,10 +387,20 @@ uint32_t Synth::tick() {
     if (activeNotes > 1) {
         mixedVout = (mixedVout * invGain[activeNotes]) >> 8;
     }
-    return (uint32_t)(mixedVout + 128);
+
+    // Biquad low-pass filter — 2nd order Butterworth, coefficients in Q1.14
+    const InstrumentPreset& p = PRESETS[globalParams_.instrument];
+    int32_t y = ((int32_t)p.b0 * mixedVout
+               + (int32_t)p.b1 * bqX1_
+               + (int32_t)p.b2 * bqX2_
+               - (int32_t)p.a1 * bqY1_
+               - (int32_t)p.a2 * bqY2_) >> 14;
+    bqX2_ = bqX1_; bqX1_ = mixedVout;
+    bqY2_ = bqY1_; bqY1_ = y;
+    return (uint32_t)(y + 128);
 }
 
-void Synth::pushNoteOn(uint8_t key, uint8_t volume, int32_t pitch, int waveform, bool remote, uint8_t octave) {
+void Synth::pushNoteOn(uint8_t key, uint8_t volume, int32_t pitch, int instrument, bool remote, uint8_t octave) {
     uint32_t baseStep = computeStep(key, octave);
     int32_t  offset   = (baseStep * (pitch >> 2)) >> 6;
 
@@ -324,7 +410,7 @@ void Synth::pushNoteOn(uint8_t key, uint8_t volume, int32_t pitch, int waveform,
     cmd.step          = baseStep;
     cmd.volume        = volume;
     cmd.pitch         = pitch;
-    cmd.waveform      = (SynthWaveform)waveform;
+    cmd.instrument    = (Instrument)instrument;
     cmd.remote        = remote;
     cmd.effectiveStep = baseStep + offset;
     pushAudioCommand(cmd);
@@ -352,32 +438,39 @@ void Synth::pushRoleChange(SynthRole newRole) {
 }
 
 void Synth::updateGlobalParams(uint32_t& lastPitch, uint8_t& lastVolume, uint8_t& lastWaveform, uint8_t& lastOctave,
-                                uint32_t pitch, uint8_t volume, uint8_t waveform, uint8_t octave) {
+                                uint32_t pitch, uint8_t volume, uint8_t instrument, uint8_t octave) {
     lastPitch    = pitch;
     lastVolume   = volume;
-    lastWaveform = waveform;
+    lastWaveform = instrument;
     lastOctave   = octave;
 
-    globalParams_.pitch    = pitch;
-    globalParams_.volume   = volume;
-    globalParams_.waveform = (SynthWaveform)waveform;
-    globalParams_.octave   = octave;
+    globalParams_.pitch      = pitch;
+    globalParams_.volume     = volume;
+    globalParams_.instrument = (Instrument)instrument;
+    globalParams_.octave     = octave;
 
     __DMB();
     globalParams_.hasChanged = true;
 }
 
 void Synth::applyGlobalParamUpdates() {
-    uint8_t       currentVol    = globalParams_.volume;
-    SynthWaveform currentWave   = globalParams_.waveform;
-    uint8_t       currentOctave = globalParams_.octave;
-    int32_t       currentPitch  = globalParams_.pitch;
+    uint8_t    currentVol    = globalParams_.volume;
+    Instrument currentInst   = globalParams_.instrument;
+    uint8_t    currentOctave = globalParams_.octave;
+    int32_t    currentPitch  = globalParams_.pitch;
+    const InstrumentPreset& p = PRESETS[currentInst];
 
     for (int i = 0; i < MAX_VOICES; i++) {
         if (sounds[i].active && !sounds[i].held && !sounds[i].remote) {
-            sounds[i].volume   = currentVol;
-            sounds[i].waveform = currentWave;
-            sounds[i].pitch    = currentPitch;
+            sounds[i].volume       = currentVol;
+            sounds[i].instrument   = currentInst;
+            sounds[i].waveform     = p.waveform;
+            sounds[i].attackRate   = p.attackRate;
+            sounds[i].decayRate    = p.decayRate;
+            sounds[i].sustainLevel = p.sustainLevel;
+            sounds[i].releaseRate  = p.releaseRate;
+            sounds[i].gain         = p.gain;
+            sounds[i].pitch        = currentPitch;
 
             uint32_t baseStep = computeStep(sounds[i].key, currentOctave);
             int32_t  offset   = (baseStep * (currentPitch >> 2)) >> 6;
@@ -390,20 +483,3 @@ void Synth::resetCommandQueue() {
     audioCommandWriteIdx_ = 0;
     audioCommandReadIdx_  = 0;
 }
-
-// ================================================= //
-// ==================== ISR ======================== //
-// ================================================= //
-
-// void sampleISR() {
-//     if (synth.readCtr == Synth::BUFFER_SIZE) {
-//         synth.readCtr = 0;
-//         synth.writeBuffer1 = !synth.writeBuffer1;
-//         xSemaphoreGiveFromISR(synth.sampleBufferSemaphore, NULL);
-//     }
-
-//     if (synth.writeBuffer1)
-//             DAC1->DHR8R1 = synth.sampleBuffer0[synth.readCtr++];
-//         else
-//             DAC1->DHR8R1 = synth.sampleBuffer1[synth.readCtr++];
-// }

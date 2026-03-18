@@ -5,11 +5,13 @@
 
 enum SynthRole { SENDER, RECEIVER, SINGLE };
 enum SynthWaveform {SQUARE, SAW, TRIANGLE, SINE, SUPERSAW, SINEFOLD};
+enum Instrument    {PIANO, MIDI, VIOLIN, FLUTE};
 enum OctaveControlMode {OCTAVE_LOCAL, OCTAVE_OFFSET};
 enum JoyState { JOY_NEUTRAL, JOY_UP, JOY_DOWN };
+enum EnvPhase { ENV_ATTACK, ENV_DECAY, ENV_SUSTAIN, ENV_RELEASE };
 
 struct DisplayState {
-    uint8_t waveform;
+    uint8_t instrument;
     uint8_t volume;
     int8_t pitch;
     int8_t octave;
@@ -24,11 +26,19 @@ struct Sound {
     uint32_t phase;
     uint8_t volume;
     int32_t pitch;
-    SynthWaveform waveform;
+    SynthWaveform waveform;  // Oscillator shape, set from instrument preset
+    Instrument instrument;
     uint8_t key;
     bool active;
     bool held;
-    bool remote; 
+    bool remote;
+    EnvPhase envPhase;
+    uint16_t envLevel;    // 0-65535, actual multiplier = envLevel >> 8
+    uint16_t attackRate;
+    uint16_t decayRate;
+    uint16_t sustainLevel;
+    uint16_t releaseRate;
+    uint8_t  gain;        // loudness normalisation: applied as (noteVout * gain) >> 7, 128 = unity
 };
 
 struct SysState{

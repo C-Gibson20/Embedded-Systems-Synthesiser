@@ -396,7 +396,7 @@ void loop() {
                 synth.sounds[i].active   = true;
                 synth.sounds[i].held     = false;
                 synth.sounds[i].remote   = false;
-                synth.sounds[i].waveform = SINEFOLD;
+                synth.sounds[i].waveform = SINEFOLD; // worst-case waveform for profiling
                 synth.sounds[i].key      = i % 12;
                 synth.sounds[i].pitch    = 127;
                 synth.sounds[i].volume   = 0;
