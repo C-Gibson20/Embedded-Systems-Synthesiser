@@ -397,7 +397,10 @@ uint32_t Synth::tick() {
                - (int32_t)p.a2 * bqY2_) >> 14;
     bqX2_ = bqX1_; bqX1_ = mixedVout;
     bqY2_ = bqY1_; bqY1_ = y;
-    return (uint32_t)(y + 128);
+    int32_t out = y + 128;
+    if (out > 255) out = 255;
+    if (out < 0)   out = 0;
+    return (uint32_t)out;
 }
 
 void Synth::pushNoteOn(uint8_t key, uint8_t volume, int32_t pitch, int instrument, bool remote, uint8_t octave) {

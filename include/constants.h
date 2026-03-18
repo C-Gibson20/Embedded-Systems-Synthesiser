@@ -20,7 +20,7 @@ constexpr double SAMPLING_RATE = 22'000.0;
 constexpr uint64_t PHASE_MODULUS = 1ULL << 32;
 
 constexpr const char* NOTE_NAMES[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
-constexpr const char* INSTRUMENT_NAMES[] = {"Piano","Midi","Violin","Flute"};
+constexpr const char* INSTRUMENT_NAMES[] = {"Piano","Midi","Vilin","Flute"};
 constexpr float F_NOTES[] = {
     261.63f, 277.18f, 293.66f, 311.13f, // C, C#, D, D#
     329.63f, 349.23f, 369.99f, 392.00f, // E, F, F#, G
@@ -53,5 +53,5 @@ constexpr uint8_t volumeIdx       = static_cast<uint8_t>(KnobIndex::VOLUME);
 constexpr uint8_t octaveOffsetIdx = static_cast<uint8_t>(KnobIndex::MODE);
 
 //Sounds
-constexpr uint8_t MAX_VOICES = 16;
+constexpr uint8_t MAX_VOICES = 12;
 constexpr int AUDIO_COMMAND_QUEUE_LENGTH = 32;
