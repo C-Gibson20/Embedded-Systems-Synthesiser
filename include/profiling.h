@@ -9,7 +9,9 @@
 
     #define PROFILE_SAMPLEGEN
     #define PROFILE_SCANKEYS
-    #define PROFILE_DISPLAY
+    #ifndef DINO_MODE
+        #define PROFILE_DISPLAY
+    #endif
     #define PROFILE_DECODE
     #define PROFILE_CAN_TX
 

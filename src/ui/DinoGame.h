@@ -36,10 +36,7 @@ private:
     void drawObstacle(U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C &u8g2);
     void drawGround(U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C &u8g2);
     void drawScore(U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C &u8g2);
-    void drawDino(bool ducking);    // stub — unused
-    void drawObstacle();            // stub — unused
-    void drawGround();              // stub — unused
-    void drawScore();               // stub — unused
+
 };
 
 extern DinoGame dinoGame;
