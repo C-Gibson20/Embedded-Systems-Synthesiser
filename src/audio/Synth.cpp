@@ -326,7 +326,7 @@ uint32_t Synth::tick() {
     uint8_t activeNotes = 0;
 
     for (int i = 0; i < MAX_VOICES; i++) {
-        volatile Sound& s = sounds[i];
+        Sound& s = sounds[i];
         if (!s.active) continue;
 
         // ADSR envelope state machine
@@ -374,8 +374,7 @@ uint32_t Synth::tick() {
 
         int32_t noteVout = (int32_t)(uncenteredValue) - 128;
         noteVout >>= (8 - s.volume);
-        noteVout = (noteVout * s.gain) >> 7;                     // loudness normalisation
-        noteVout = (noteVout * (int32_t)(s.envLevel >> 8)) >> 8; // apply envelope
+        noteVout = (noteVout * ((int32_t)s.gain * (s.envLevel >> 8))) >> 15;
         mixedVout += noteVout;
         activeNotes++;
     }

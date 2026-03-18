@@ -43,7 +43,7 @@ public:
     volatile bool writeBuffer1 = false;
     SemaphoreHandle_t sampleBufferSemaphore;
 
-    volatile Sound sounds[MAX_VOICES];
+    Sound sounds[MAX_VOICES];
 
     void begin();
     void processCommands();
