@@ -305,6 +305,13 @@ void initialiseThreads() {
     #endif
 }
 
+#if defined(PROFILING_MODE) && defined(DINO_MODE)
+void dinoProfileTask(void*) {
+    dinoGame.tick(JOY_UP);  // JOY_UP triggers jump — exercises physics + collision
+    display.update();        // renders dino, obstacle, score, ground
+}
+#endif
+
 #ifdef PROFILING_MODE
 void printAverageTime(const char* taskName, uint32_t totalTime, int iterations) {
     Serial.print(taskName);
@@ -404,6 +411,11 @@ void loop() {
             profileTask(sampleGenTask, "sampleGenTask");
         #endif
         
+        #ifdef PROFILE_DINO
+            dinoGame.reset();  // sets state to DINO_PLAYING with obstacle at x=128
+            profileTask(dinoProfileTask, "dinoTask");
+        #endif
+
         #ifdef PROFILE_SCANKEYS
             profileTask(scanKeysTask, "scanKeysTask");
         #endif

@@ -14,6 +14,7 @@ public:
     void begin();
     void tick(JoyState joy);
     void render(U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C &u8g2);
+    void reset();
 
 private:
     DinoState state_    = DINO_IDLE;
@@ -39,7 +40,6 @@ private:
     void drawObstacle();            // stub — unused
     void drawGround();              // stub — unused
     void drawScore();               // stub — unused
-    void reset();
 };
 
 extern DinoGame dinoGame;
