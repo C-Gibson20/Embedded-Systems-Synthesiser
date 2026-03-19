@@ -7,14 +7,21 @@
     #define DISABLE_THREADS
     #define DISABLE_ISRS
 
+    #define PROFILE_SAMPLEGEN
     #define PROFILE_SCANKEYS
-    #define PROFILE_DISPLAY
+    #ifndef DINO_MODE
+        #define PROFILE_DISPLAY
+    #endif
     #define PROFILE_DECODE
     #define PROFILE_CAN_TX
 
     #define PROFILE_SAMPLE_ISR
     #define PROFILE_CAN_RX_ISR
     #define PROFILE_CAN_TX_ISR
+
+    #ifdef DINO_MODE
+        #define PROFILE_DINO
+    #endif
 
     #ifdef I2C_EXPANDER_KNOBS
         #define PROFILE_KNOB

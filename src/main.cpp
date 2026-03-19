@@ -15,29 +15,7 @@
 
 // Version flags (V2, I2C_EXPANDER_KNOBS) are set in platformio.ini build_flags.
 
-// ================================================= //
-// =================== Profiling =================== //
-// ================================================= //
-
-#ifdef PROFILING_MODE
-    #define DISABLE_THREADS
-    #define DISABLE_ISRS
-  
-    #define PROFILE_SAMPLEGEN
-    #define PROFILE_SCANKEYS
-    #define PROFILE_DISPLAY
-    #define PROFILE_DECODE
-    #define PROFILE_CAN_TX
-
-    #define PROFILE_SAMPLE_ISR
-    #define PROFILE_CAN_RX_ISR
-    #define PROFILE_CAN_TX_ISR
-
-    // #ifdef I2C_EXPANDER_KNOBS
-    //     #define PROFILE_KNOB
-    //     #define PROFILE_KNOB_ISR
-    // #endif
-#endif
+#include "profiling.h"
 
 // ================================================= //
 // ================== Shared State ================= //
@@ -73,8 +51,6 @@ void handleSynthRole(SynthRole &localRole, bool westConnected, bool eastConnecte
     // If auto-configuration has not been overridden, determine role based on connections
     else if (!overwrittenAutoConfig && !westConnected && eastConnected) localRole = SENDER;
     else if (!overwrittenAutoConfig && westConnected) localRole = RECEIVER;
-
-    // role = RECEIVER; // Force receiver for testing
 
     if (localRole != lastRole) synth.pushRoleChange(localRole);
     lastRole = localRole;
@@ -305,6 +281,13 @@ void initialiseThreads() {
     #endif
 }
 
+#if defined(PROFILING_MODE) && defined(DINO_MODE)
+void dinoProfileTask(void*) {
+    dinoGame.tick(JOY_UP);  // JOY_UP triggers jump — exercises physics + collision
+    display.update();        // renders dino, obstacle, score, ground
+}
+#endif
+
 #ifdef PROFILING_MODE
 void printAverageTime(const char* taskName, uint32_t totalTime, int iterations) {
     Serial.print(taskName);
@@ -404,6 +387,11 @@ void loop() {
             profileTask(sampleGenTask, "sampleGenTask");
         #endif
         
+        #ifdef PROFILE_DINO
+            dinoGame.reset();  // sets state to DINO_PLAYING with obstacle at x=128
+            profileTask(dinoProfileTask, "dinoTask");
+        #endif
+
         #ifdef PROFILE_SCANKEYS
             profileTask(scanKeysTask, "scanKeysTask");
         #endif

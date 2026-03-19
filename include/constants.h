@@ -53,5 +53,5 @@ constexpr uint8_t volumeIdx       = static_cast<uint8_t>(KnobIndex::VOLUME);
 constexpr uint8_t octaveOffsetIdx = static_cast<uint8_t>(KnobIndex::MODE);
 
 //Sounds
-constexpr uint8_t MAX_VOICES = 16;
+constexpr uint8_t MAX_VOICES = 12;
 constexpr int AUDIO_COMMAND_QUEUE_LENGTH = 32;

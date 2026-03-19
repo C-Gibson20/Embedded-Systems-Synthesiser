@@ -28,5 +28,4 @@ public:
     bool isPressed();
 
     int8_t getValue();
-    int8_t getValueISR();
 };

@@ -2,9 +2,6 @@
 
 ## Overview
 
-The six waveform slots (previously Square, Saw, Triangle, Sine, SuperSaw, SineFold) have been
-replaced with four instrument presets. The knob range was reduced from 0–5 to 0–3 to match.
-
 Each instrument preset defines:
 - Which oscillator waveform to use underneath
 - Its own ADSR envelope (attack, decay, sustain level, release)

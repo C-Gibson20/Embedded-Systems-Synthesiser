@@ -187,7 +187,3 @@ void DinoGame::render(U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C &u8g2) {
     u8g2.sendBuffer();
 }
 
-void DinoGame::drawDino(bool ducking) {}
-void DinoGame::drawObstacle() {}
-void DinoGame::drawGround() {}
-void DinoGame::drawScore() {}

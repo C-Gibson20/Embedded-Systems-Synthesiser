@@ -106,8 +106,6 @@ extern "C" void HAL_DAC_ConvCpltCallbackCh1(DAC_HandleTypeDef* hdac) {
     portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
-// static HardwareTimer sampleTimer_(TIM1);
-
 // ================================================= //
 // ============== Instrument presets ============== //
 // ================================================= //
@@ -217,7 +215,6 @@ void Synth::begin() {
     freeTop_ = MAX_VOICES;
     bqX1_ = bqX2_ = bqY1_ = bqY2_ = 0;
     
-    // analogWrite(OUTR_PIN, 128);
     sampleBufferSemaphore = xSemaphoreCreateBinary();
     xSemaphoreGive(sampleBufferSemaphore);       
     memset(sampleBuffer, 128, BUFFER_SIZE);       
@@ -225,11 +222,6 @@ void Synth::begin() {
     MX_DMA_Init();   
     MX_DAC1_Init();  
     MX_TIM6_Init();
-    // sampleTimer_.setOverflow(22000, HERTZ_FORMAT);
-    // #ifndef DISABLE_ISRS
-    //     sampleTimer_.attachInterrupt(sampleISR);
-    // #endif
-    // sampleTimer_.resume();
 }
 
 void Synth::processCommands() {
@@ -314,11 +306,17 @@ void Synth::processCommands() {
 
 void Synth::fillBuffer() {
     processCommands();
-    
+
     uint32_t start = writeBuffer1 ? BUFFER_SIZE/2 : 0;
     for (uint32_t i = start; i < (start+BUFFER_SIZE/2); i++) {
         sampleBuffer[i] = tick();
     }
+
+    uint16_t bitmask = 0;
+    for (int i = 0; i < MAX_VOICES; i++) {
+        if (sounds[i].active) bitmask |= (1 << sounds[i].key);
+    }
+    activeNotesBitmask = bitmask;
 }
 
 uint32_t Synth::tick() {
@@ -326,7 +324,7 @@ uint32_t Synth::tick() {
     uint8_t activeNotes = 0;
 
     for (int i = 0; i < MAX_VOICES; i++) {
-        volatile Sound& s = sounds[i];
+        Sound& s = sounds[i];
         if (!s.active) continue;
 
         // ADSR envelope state machine
@@ -374,8 +372,7 @@ uint32_t Synth::tick() {
 
         int32_t noteVout = (int32_t)(uncenteredValue) - 128;
         noteVout >>= (8 - s.volume);
-        noteVout = (noteVout * s.gain) >> 7;                     // loudness normalisation
-        noteVout = (noteVout * (int32_t)(s.envLevel >> 8)) >> 8; // apply envelope
+        noteVout = (noteVout * ((int32_t)s.gain * (s.envLevel >> 8))) >> 15;
         mixedVout += noteVout;
         activeNotes++;
     }
@@ -397,7 +394,10 @@ uint32_t Synth::tick() {
                - (int32_t)p.a2 * bqY2_) >> 14;
     bqX2_ = bqX1_; bqX1_ = mixedVout;
     bqY2_ = bqY1_; bqY1_ = y;
-    return (uint32_t)(y + 128);
+    int32_t out = y + 128;
+    if (out > 255) out = 255;
+    if (out < 0)   out = 0;
+    return (uint32_t)out;
 }
 
 void Synth::pushNoteOn(uint8_t key, uint8_t volume, int32_t pitch, int instrument, bool remote, uint8_t octave) {
