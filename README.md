@@ -48,17 +48,24 @@ scripts/              # Development utilities
 
 **CAN-Based Distributed Synthesis**
 
-<video src="doc/CAN.mp4" controls width="600"></video>
+https://github.com/user-attachments/assets/94364843-ae49-44b5-b197-1cc3da56e4ed
+<!-- <video src="doc/CAN.mp4" controls width="600"></video> -->
+[CAN-Based Distributed Synthesis Video](doc/CAN.mp4)
 
 **Instrument Presets and Advanced Waveforms**
 
-<video src="doc/Instruments.mp4" controls width="600"></video>
+https://github.com/user-attachments/assets/65f04ced-008e-4458-b12b-2c6a1a11a4ac
+<!-- <video src="doc/Instruments.mp4" controls width="600"></video> -->
+[Instrument Presets and Advanced Waveforms Video](doc/Instruments.mp4)
 
 **Held Notes and Polyphony**
 
-<video src="doc/Held.mp4" controls width="600"></video>
+https://github.com/user-attachments/assets/5124a1bb-8d5a-4f10-9eff-a028388088a4
+<!-- <video src="doc/Held.mp4" controls width="600"></video> -->
+[Held Notes and Polyphony Video](doc/Held.mp4)
 
 **Display-Based Mini Game**
 
-<video src="doc/Dino.mp4" controls width="600"></video>
----
+https://github.com/user-attachments/assets/3525706e-4e00-4314-abe7-5119c1b3943a
+<!-- <video src="doc/Dino.mp4" controls width="600"></video> -->
+[Display-Based Mini Game Video](doc/Dino.mp4)
