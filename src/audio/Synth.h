@@ -20,11 +20,6 @@ struct AudioCommand {
     int32_t          pitch;
     Instrument       instrument;
     bool             remote;
-    bool             updatePitch;
-    bool             updateVolume;
-    bool             updateWave;
-    bool             updateOctave;
-    int8_t           octaveValue;
 };
 
 struct GlobalParameters {
@@ -44,6 +39,7 @@ public:
     SemaphoreHandle_t sampleBufferSemaphore;
 
     Sound sounds[MAX_VOICES];
+    uint16_t activeNotesBitmask = 0; // written by sampleGenTask, read by displayUpdateTask — atomic on ARM Cortex-M4
 
     void begin();
     void processCommands();

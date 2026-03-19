@@ -106,8 +106,6 @@ extern "C" void HAL_DAC_ConvCpltCallbackCh1(DAC_HandleTypeDef* hdac) {
     portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
-// static HardwareTimer sampleTimer_(TIM1);
-
 // ================================================= //
 // ============== Instrument presets ============== //
 // ================================================= //
@@ -217,7 +215,6 @@ void Synth::begin() {
     freeTop_ = MAX_VOICES;
     bqX1_ = bqX2_ = bqY1_ = bqY2_ = 0;
     
-    // analogWrite(OUTR_PIN, 128);
     sampleBufferSemaphore = xSemaphoreCreateBinary();
     xSemaphoreGive(sampleBufferSemaphore);       
     memset(sampleBuffer, 128, BUFFER_SIZE);       
@@ -225,11 +222,6 @@ void Synth::begin() {
     MX_DMA_Init();   
     MX_DAC1_Init();  
     MX_TIM6_Init();
-    // sampleTimer_.setOverflow(22000, HERTZ_FORMAT);
-    // #ifndef DISABLE_ISRS
-    //     sampleTimer_.attachInterrupt(sampleISR);
-    // #endif
-    // sampleTimer_.resume();
 }
 
 void Synth::processCommands() {
@@ -314,11 +306,17 @@ void Synth::processCommands() {
 
 void Synth::fillBuffer() {
     processCommands();
-    
+
     uint32_t start = writeBuffer1 ? BUFFER_SIZE/2 : 0;
     for (uint32_t i = start; i < (start+BUFFER_SIZE/2); i++) {
         sampleBuffer[i] = tick();
     }
+
+    uint16_t bitmask = 0;
+    for (int i = 0; i < MAX_VOICES; i++) {
+        if (sounds[i].active) bitmask |= (1 << sounds[i].key);
+    }
+    activeNotesBitmask = bitmask;
 }
 
 uint32_t Synth::tick() {

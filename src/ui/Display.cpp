@@ -62,12 +62,7 @@ void Display::updateState() {
     xSemaphoreGive(sysState.mutex);
 
     uint8_t displayOctaveIdx = (octaveMode == OCTAVE_LOCAL) ? octaveIdx : octaveOffsetIdx;
-    // TODO: data race — sounds[] is written by sampleISR without synchronisation.
-    // Fix: read inside a critical section or maintain an ISR-safe active-notes bitmask.
-    uint16_t activeNotes = 0;
-    for (int i = 0; i < MAX_VOICES; i++) {
-        if (synth.sounds[i].active) activeNotes |= (1 << synth.sounds[i].key);
-    }
+    uint16_t activeNotes = synth.activeNotesBitmask;
 
     xSemaphoreTake(sysState.mutex, portMAX_DELAY);
     sysState.displayState.instrument  = knobManager.knobs[waveIdx].getValue();
