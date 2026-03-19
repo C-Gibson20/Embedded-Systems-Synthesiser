@@ -268,21 +268,23 @@ CAN messages use a fixed 8-byte format. This simplifies encoding and avoids dyna
 
 ### User Interface Subsystem `src/ui`
 
-#### **`Display.h`**
-
-TODO Jeremy
-
 #### **`Display.cpp`**
 
-TODO Jeremy
+`updateState()` reads knob values and `synth.activeNotesBitmask` (an atomic ARM Cortex-M4 word read) and writes them into `sysState.displayState` under mutex protection. The octave knob index is selected based on the current `OctaveControlMode`.
 
-#### **`DinoGame.h`**
+`update()` snapshots display state from `sysState` under the mutex and calls `sendBuffer()` only if `stateChanged()` returns true, avoiding redundant I2C transfers. When `DINO_MODE` is defined it delegates entirely to `dinoGame.render()` and returns immediately.
 
-TODO Jeremy
+`u8x8_byte_rtos_hw_i2c()` is the custom U8g2 I2C callback active when `I2C_EXPANDER_KNOBS` is defined. It acquires `knobManager.i2cMutex` on transfer start and releases it on transfer end, preventing interleaving with `knobTask` reads on the shared I2C bus.
 
 #### **`DinoGame.cpp`**
 
-TODO Jeremy
+Sprite data is stored as static XBM byte arrays: two alternating run frames and a dead frame for the dinosaur, and a cactus obstacle. All sprites are rendered using `u8g2.drawXBMP()`.
+
+`tick()` drives the state machine each frame. A rising-edge check on the joystick input (`joy == JOY_UP && prevJoy_ != JOY_UP`) gates state transitions, preventing repeated triggers from a held input.
+
+`updatePhysics()` applies gravity to `velY_` each frame and clamps the dinosaur at `GROUND_Y - 12`. `updateObstacle()` scrolls the cactus left by `speed_`, wrapping it to the right edge on exit and incrementing speed every ten obstacles. Collision uses AABB with a 2-pixel forgiveness margin on each side.
+
+`drawDino()` selects the sprite based on state: dead frame when dead, `dino_run1` when airborne, and alternating between run frames every four ticks via `(frameCount_ / 4) % 2` when on the ground.
 
 ## Hardware Control `Knob.cpp`
 

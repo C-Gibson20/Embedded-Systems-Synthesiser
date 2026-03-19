@@ -3,9 +3,23 @@
 
 This document describes the functional features implemented in the synthesiser system.  These features are built on top of the architecture described in the report and are implemented using the modules documented in the [modules.md](modules.md) file.
 
-The following video clearly demonstrates the advanced features implemented in our system.
+## Demonstrations
 
-TODO Video showing off feature
+**CAN-Based Distributed Synthesis**
+
+<video src="../CAN.mp4" controls width="600"></video>
+
+**Instrument Presets and Advanced Waveforms**
+
+<video src="../Instruments.mp4" controls width="600"></video>
+
+**Held Notes and Polyphony**
+
+<video src="../Held.mp4" controls width="600"></video>
+
+**Display-Based Mini Game**
+
+<video src="../Dino.mp4" controls width="600"></video>
 
 ## Core Features
 
@@ -64,21 +78,16 @@ Encoder inputs are processed using quadrature decoding and atomic state updates,
 
 ### OLED Display Interface
 
-TODO Jeremy
+The OLED display provides real-time visual feedback of the synthesiser state, updated at 10 Hz by a dedicated FreeRTOS task. Three lines are rendered:
 
-Possible topics:
+- **Line 1 — Active notes:** Names of all currently sounding notes.
+- **Line 2 — Synthesis parameters:** Pitch offset, waveform, octave (local or offset mode), and volume.
+- **Line 3 — Network role and CAN message:** Current device role (Sender / Receiver / Single) and the most recent CAN message payload.
 
-- system state display
-- parameter feedback
-- user interface elements
-- The OLED display is interfaced using the U8g2 graphics library, which requires a platform-specific byte-level communication callback. In the V2 system, a custom implementation, `u8x8_byte_rtos_hw_i2c`, is provided to integrate the display driver with the underlying STM32 hardware and FreeRTOS environment.
-    
-    This function replaces the default blocking I2C implementation supplied by the library, and instead utilises the STM32 hardware I2C peripheral. By leveraging hardware-driven transfers, the implementation reduces CPU overhead and improves transfer efficiency.
-    
-    The custom interface is designed to be compatible with the RTOS environment. In particular, it allows the scheduler to interleave other tasks during longer transfers.
-    
-    As a result, the display update task benefits from improved execution efficiency and more predictable timing behaviour. This is important given that display updates involve transferring relatively large frame buffers over I2C.
-    
+To reduce I2C bus load, `sendBuffer()` is only called when the displayed content has changed since the last frame.
+
+In V2, a custom U8g2 I2C callback (`u8x8_byte_rtos_hw_i2c`) replaces the default blocking implementation. It uses the STM32 hardware I2C peripheral and acquires the shared `i2cMutex` around each transaction, preventing conflicts with the knob expander on the same bus. This significantly reduces the WCET of `displayUpdateTask` compared to V1. In practice, real-world execution time is lower still, as typical frames are sparse and `sendBuffer()` is frequently skipped — see [Profiling](profiling.md) for further discussion.
+
 
 ## Networking Features
 
@@ -134,21 +143,22 @@ Waveform generation is performed using a combination of lookup tables (e.g. sine
 
 ### Advanced Sound Effects
 
-TODO Jeremy
+Each voice passes through an ADSR envelope and a per-instrument biquad low-pass filter, giving each waveform a distinct tonal character that evolves over the duration of a note.
 
-Possible topics:
+**ADSR Envelope**
 
-- ASDR
-- Biquad
-- --
+Each active voice runs an independent ADSR state machine. The envelope level (0–65535) is updated every sample at 22 kHz and scales the voice output amplitude. Attack, decay, sustain, and release rates are defined per instrument preset. On note-off, the voice transitions to the release phase and is freed once the envelope reaches zero, allowing notes to decay naturally rather than cutting off abruptly.
+
+**Biquad Low-Pass Filter**
+
+A 2nd-order Butterworth low-pass filter is applied to the mixed output each sample. Coefficients are precomputed offline per instrument in Q1.14 fixed-point arithmetic, avoiding any floating-point computation at runtime. The cutoff frequency is tuned per instrument. The filter was developed from an initial single-pole IIR low-pass design and extended to a biquad for a steeper roll-off. Since coefficients are computed offline, more sophisticated filter designs, such as higher-order or band-pass variants, could be substituted with no additional runtime cost.
+
+**Instrument Presets**
+
+Waveform selection simultaneously applies a full preset combining ADSR rates, biquad coefficients, and a gain normalisation factor. This allows a single encoder control to switch between meaningfully distinct sounds rather than just changing the raw waveform shape.
 
 ### Display-Based Mini Game
 
-TODO Jeremy
+An optional side-scrolling dinosaur game rendered on the OLED display. Enabled at compile time by uncommenting `-D DINO_MODE` in `platformio.ini`, with zero runtime overhead when disabled.
 
-Possible topics:
-
-- rendering logic
-- input interaction
-- compile-time feature enabling
-- --
+The player jumps over approaching cacti using the joystick, with speed increasing every ten obstacles. See [Display](../implementation/code_structure.md#display) and [DinoGame](../implementation/code_structure.md#dinogame) for implementation details.

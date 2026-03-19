@@ -302,19 +302,35 @@ This design separates hardware interrupts from higher-level message processing a
 
 #### **`Display.h`**
 
-TODO Jeremy
+Declares the `Display` class and the `displayUpdateTask` FreeRTOS task entry point.
+
+The class exposes `begin()` for hardware initialisation and `update()` for one render cycle. Private state holds the U8g2 driver instance, a cached `DisplayState`, and the last CAN message, used to skip `sendBuffer()` calls when content is unchanged.
 
 #### **`Display.cpp`**
 
-TODO Jeremy
+Implements the display update logic and, in V2, a custom I2C byte-level callback for the U8g2 library.
+
+`begin()` asserts the display reset line, optionally injects the custom I2C callback, calls `u8g2_.begin()`, and sets the I2C clock to 1 MHz. `update()` reads system state under the mutex, renders a three-line layout (active notes, synthesis parameters, network role and CAN message), and flushes the frame buffer only if `stateChanged()` returns true, avoiding redundant I2C transfers. When `DINO_MODE` is defined, `update()` delegates to `dinoGame.render()` and returns immediately.
+
+`u8x8_byte_rtos_hw_i2c()` is the custom U8g2 callback active when `I2C_EXPANDER_KNOBS` is defined. It acquires and releases `knobManager.i2cMutex` around each I2C transaction to prevent interleaving with `knobTask` reads on the shared bus.
 
 #### **`DinoGame.h`**
 
-TODO Jeremy
+Declares the `DinoGame` class and compile-time physics and layout constants (`GROUND_Y`, `DINO_X`, `GRAVITY`, `JUMP_VEL`).
+
+The `DinoState` enumeration defines three states: `DINO_IDLE`, `DINO_PLAYING`, and `DINO_DEAD`. The class exposes `tick(JoyState)` to advance game logic each frame and `render()` to draw to the display.
 
 #### **`DinoGame.cpp`**
 
-TODO Jeremy
+Implements the game logic, physics, and sprite rendering for the optional display-based mini game.
+
+Sprite data is stored as static XBM byte arrays: two alternating dinosaur run frames, a dead frame, and a cactus obstacle sprite. All sprites are drawn using `u8g2.drawXBMP()`.
+
+`tick()` drives the state machine, transitioning between idle, playing, and dead states on rising-edge joystick input. While playing it calls `updatePhysics()`, `updateObstacle()`, and `checkCollision()` each frame.
+
+`updatePhysics()` applies gravity and ground clamping each frame, with a jump initiated by setting `velY_` to `JUMP_VEL` on a joystick press. `updateObstacle()` scrolls the cactus left, wrapping it to the right edge on exit, incrementing the score, and increasing speed every ten obstacles. Collision detection uses AABB with a 2-pixel forgiveness margin.
+
+`render()` composes the full frame — ground, dinosaur, obstacle, and score — and calls `sendBuffer()` unconditionally each frame. The dinosaur sprite alternates between run frames every four frames when on the ground.
 
 ## System Configuration `config.cpp`
 
