@@ -21,7 +21,7 @@ The analysis assumes a fixed-priority pre-emptive scheduling model implemented b
 
 ## 5.1 Task Priority Assignment
 
-Based on the task periods identified in the timing analysis, priorities are assigned as shown in Table 1.
+Based on the task periods identified in the timing analysis, priorities are assigned as shown in the table below.
 
 | Task | Priority | Period | Type |
 | --- | --- | --- | --- |
@@ -180,7 +180,7 @@ $$
 
 then the system is guaranteed to be schedulable. The calculations shows that each version of the code is well within the bound, even with very pessimistic WCET estimates.
 
-Figure 1 presents the worst-case CPU utilisation across the tasks and system versions.
+The figure below presents the worst-case CPU utilisation across the tasks and system versions.
 
 ![image.png](utilisation.png)
 

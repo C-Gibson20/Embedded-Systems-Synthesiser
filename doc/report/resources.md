@@ -7,7 +7,7 @@ The system uses a combination of FreeRTOS synchronisation primitives and atomic 
 
 ## 6.1 Shared Data Structures
 
-The shared resources used by the system are summarised in Table 1.
+The shared resources used by the system are summarised in the table below.
 
 | Resource | Shared by | Access type | Protection |
 | --- | --- | --- | --- |

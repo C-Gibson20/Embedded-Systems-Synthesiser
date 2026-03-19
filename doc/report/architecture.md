@@ -10,7 +10,7 @@ The system architecture can be divided into two main components, the hardware pl
 
 The synthesiser is implemented on an STM32L4 microcontroller interfaced with a StackSynth hardware module providing audio output, input controls, and display functionality.
 
-The principal hardware components used by the system are shows in Table 1.
+The principal hardware components used by the system are shown in the table below.
 
 | Component | Function |
 | --- | --- |
@@ -28,7 +28,7 @@ User interaction is provided through a scanned key matric and rotary encoders wh
 
 ## 1.2 Software Architecture
 
-The software system is structured into modular subsystems that separate functional responsibilities and simplify concurrent execution. Table 2 summarises the main subsystems.
+The software system is structured into modular subsystems that separate functional responsibilities and simplify concurrent execution. The table below summarises the main subsystems.
 
 | Subsystem | Responsibility |
 | --- | --- |
