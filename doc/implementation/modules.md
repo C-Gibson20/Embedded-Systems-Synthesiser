@@ -114,13 +114,10 @@ The bitmask is a single 16-bit word write, which is atomic on ARM Cortex-M4. Thi
 
 Iterates over all voice slots and generates one output sample to be put into the sample buffer. The function performs four stages.
 
-*Voice mixing.* For each active voice slot it advances the ADSR envelope state machine, accumulates the phase, generates the waveform sample, applies volume scaling, gain normalisation, and envelope modulation, and sums the result into a signed mixer accumulator.
-
-*Automatic gain control.* If more than one voice is active, the mixed output is divided by the number of active voices using a precomputed reciprocal table to avoid runtime division.
-
-*Biquad filtering.* A second-order Butterworth low-pass filter is applied as audio post-processing using the current instrument's coefficients in Q1.14 fixed-point arithmetic.
-
-*Output clamping.* The filtered output is centred at 128 and clamped to the 0–255 range to prevent overflow.
+1. Voice mixing: For each active voice slot it advances the ADSR envelope state machine, accumulates the phase, generates the waveform sample, applies volume scaling, gain normalisation, and envelope modulation, and sums the result into a signed mixer accumulator.
+2. Automatic gain control: If more than one voice is active, the mixed output is divided by the number of active voices using a precomputed reciprocal table to avoid runtime division.
+3. Biquad filtering: A second-order Butterworth low-pass filter is applied as audio post-processing using the current instrument's coefficients in Q1.14 fixed-point arithmetic.
+4. Output clamping: The filtered output is centred at 128 and clamped to the 0–255 range to prevent overflow.
 
 <br>
 
@@ -132,11 +129,13 @@ Iterates over all voice slots and generates one output sample to be put into the
 
 <br>
 
-##### **Runtime Optimisations**
+**Runtime Optimisations**
 
 Audio output uses DMA circular mode with double buffering. The CPU fills 64 samples into the sample buffer while the DMA streams the other half to the DAC. This eliminates a sample interrupt thread, which has overhead.
 
 The ADSR envelope, gain normalisation, and volume scaling are applied in a single expression rather than as separate multiply-and-shift stages. This reduces the number of operations per voice per sample.
+
+<br>
 
 ### Input Subsystem `src/io`
 
