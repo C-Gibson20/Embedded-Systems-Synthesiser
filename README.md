@@ -36,13 +36,13 @@ The project documentation is organised into two main sections:
 
 ### System Design and Analysis
 
-- [Report Documentation](docs/report/README.md)
+- [Report Documentation](doc/report/README.md)
 
 Covers system architecture, task design, timing analysis, schedulability, and resource management.
 
 ### Implementation Documentation
 
-- [Implementation Documentation](docs/implementation/README.md)
+- [Implementation Documentation](doc/implementation/README.md)
 
 Describes the codebase structure, module responsibilities, and implementation details.
 
@@ -51,7 +51,7 @@ Describes the codebase structure, module responsibilities, and implementation de
 ## Repository Structure
 
 ```text
-docs/
+doc/
 ├── report/           # Design, analysis, and real-time evaluation
 └── implementation/   # Code structure and implementation details
 
