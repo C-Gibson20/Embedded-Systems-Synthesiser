@@ -151,12 +151,6 @@ It is divided into subsystem directories reflecting the system architecture.
 
 #### **`Synth.h`**
 
-Defines the Synth class, which contains the core audio synthesis pipeline. 
-
-The header declares several structs, which are used to interact with hardware components and store the state of the synthesizer itself. 
-
-#### **`Synth.h`**
-
 Defines the `Synth` class, which manages the core audio generation pipeline including voice allocation, waveform generation, and audio buffer output.
 
 The header declares several supporting types used by the audio subsystem.

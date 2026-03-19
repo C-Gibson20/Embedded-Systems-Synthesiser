@@ -12,7 +12,131 @@ It is divided into subsystem directories reflecting the system architecture.
 
 #### **`Synth.h` and `Synth.cpp`**
 
-TODO Kayvan
+The `Synth` module implements the audio generation pipeline. It generates polyphonic audio output using DMA-driven DAC conversion, supports multiple instrument presets with ADSR envelopes and biquad filtering, and uses a lock-free command queue to receive note events from other subsystems.
+
+<br>
+
+**Hardware Initialisation**
+
+The module configures three STM32 peripherals to produce continuous audio output:
+
+- **TIM6** is configured as a timer with a period of 3636 ticks at 80 MHz, producing an update event at approximately 22 kHz. This event serves as the DAC trigger.
+- **DAC1 Channel 1** is configured to convert one sample on each TIM6 trigger. The output buffer is enabled to drive the analogue output pin directly.
+- **DMA1 Channel 3** transfers samples from the sample buffer to the DAC data register in circular mode. The buffer is 128 bytes, divided into two halves. When the DMA completes the first half, it raises a half-transfer interrupt. When it completes the second half, it raises a transfer-complete interrupt.
+
+This arrangement allows the CPU to fill the write portion of the sample buffer while the DMA streams the other half to the DAC, ensuring continuous audio output.
+
+<br>
+
+**DMA Callbacks**
+
+`HAL_DAC_ConvHalfCpltCallbackCh1()` and `HAL_DAC_ConvCpltCallbackCh1()` are called from the DMA transfer interrupt. Each callback sets the `writeBuffer1` flag to indicate which buffer half is should be written to, then gives the `sampleBufferSemaphore` to trigger the samplegen task to start generating the next block of samples.
+
+Only minimal work is performed in interrupt context. The semaphore handoff ensures that all synthesis computation occurs in a task context.
+
+<br>
+
+**Instrument Presets**
+
+The `InstrumentPreset` structure defines the timbral character of each instrument:
+
+```cpp
+struct InstrumentPreset {
+    SynthWaveform waveform;
+    uint16_t attackRate, decayRate, sustainLevel, releaseRate;
+    uint8_t gain;
+    int16_t b0, b1, b2, a1, a2;
+};
+```
+
+Each preset specifies:
+
+- The oscillator waveform shape.
+- ADSR envelope rates, computed as increments per sample on a 0–65535 scale at 22 kHz.
+- A gain value for loudness normalisation across instruments, applied as `(sample * gain) >> 7` where 128 represents unity.
+- Biquad low-pass filter coefficients in Q1.14 fixed-point format, computed offline as a second-order Butterworth filter at the target cutoff frequency.
+
+Four presets are defined: Piano (sawtooth, 3500 Hz cutoff), MIDI (square, no filter), Violin (supersaw, 2000 Hz cutoff), and Flute (sine, 4500 Hz cutoff).
+
+<br>
+
+**Waveform Functions**
+
+Six waveform generators are implemented as static inline functions. Each takes an 8-bit phase index and returns an unsigned 8-bit amplitude value.
+
+- `funcSquare` returns 255 for the first half of the cycle and 0 for the second.
+- `funcSaw` returns the phase index directly.
+- `funcTri` ramps up for the first half and ramps down for the second.
+- `funcSine` looks up the value from a precomputed 512-entry sine table.
+- `funcSuperSaw` mixes two detuned sawtooth waves for a thicker sound.
+- `funcSineFold` applies wavefold distortion to the sine output.
+
+<br>
+
+**Lock-Free Command Queue**
+
+Communication between other subsystems and the synth object uses a ring buffer indexed by separate read and write pointers.
+
+`pushAudioCommand()` is called by other subsystems to submit audio commands, note release, sustained held notes, and role change events to the synth object without acquiring a mutex. The write is performed inside a critical section to ensure atomicity of the update. A data memory barrier ensures the command data is visible before the write pointer advances.
+
+`processCommands()` is called at the start of each buffer fill. It reads the write index once, issues a memory barrier, and then processes all pending audio commands up to the current write index. This avoids locking between the producer and consumer.
+
+The queue has a fixed capacity of 32 entries, to absorb bursts from key scanning and CAN reception without overflow.
+
+<br>
+
+**Sound Allocation**
+
+The synth object maintains a fixed-size pool of `Sound` voice slots supporting polyphonic playback up to `MAX_VOICES` simultaneous voices. Voice allocation and deallocation is managed using a free-list stack.
+
+`allocateSound()` pops the top index from `freeSounds_[]` and returns it. If no voices are available it returns -1 and the note is silently dropped.
+
+`freeSound()` pushes the index back onto the stack when a voice finishes its release phase.
+
+This avoids linear searches for free slots and provides constant-time allocation.
+
+<br>
+
+**`fillBuffer()`**
+
+Performs one complete buffer-fill:
+
+1. Calls `processCommands()` to apply any pending audio commands.
+2. Determines the write portion of the sample buffer from the `writeBuffer1` flag.
+3. Generates half a sample buffer full of samples by calling `tick()` in a loop.
+4. Computes the `activeNotesBitmask` for display use.
+
+The bitmask is a single 16-bit word write, which is atomic on ARM Cortex-M4. This allows the display task to read it without synchronisation.
+
+<br>
+
+**`tick()`**
+
+Iterates over all voice slots and generates one output sample to be put into the sample buffer. The function performs four stages.
+
+*Voice mixing.* For each active voice slot it advances the ADSR envelope state machine, accumulates the phase, generates the waveform sample, applies volume scaling, gain normalisation, and envelope modulation, and sums the result into a signed mixer accumulator.
+
+*Automatic gain control.* If more than one voice is active, the mixed output is divided by the number of active voices using a precomputed reciprocal table to avoid runtime division.
+
+*Biquad filtering.* A second-order Butterworth low-pass filter is applied as audio post-processing using the current instrument's coefficients in Q1.14 fixed-point arithmetic.
+
+*Output clamping.* The filtered output is centred at 128 and clamped to the 0–255 range to prevent overflow.
+
+<br>
+
+**Global Parameter Updates**
+
+`updateGlobalParams()` is called by `scanKeysTask` when a knob value changes. It writes the new global parameters into the `GlobalParameters` structure, which uses `volatile` fields to ensure visibility across tasks, followed by a memory barrier.
+
+`applyGlobalParamUpdates()` is called immediately after to push the global change to all active non-held voices. It applies the current instrument preset, volume, pitch, and recomputed step sizes. Held and remote voices are excluded to preserve their original parameters.
+
+<br>
+
+##### **Runtime Optimisations**
+
+Audio output uses DMA circular mode with double buffering. The CPU fills 64 samples into the sample buffer while the DMA streams the other half to the DAC. This eliminates a sample interrupt thread, which has overhead.
+
+The ADSR envelope, gain normalisation, and volume scaling are applied in a single expression rather than as separate multiply-and-shift stages. This reduces the number of operations per voice per sample.
 
 ### Input Subsystem `src/io`
 
