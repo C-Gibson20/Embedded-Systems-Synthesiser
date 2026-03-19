@@ -53,9 +53,7 @@ The worst-case response time of each task is determined using critical instant a
 
 The response time $R_i$ of task $i$ is given by:
 
-$$
-R_i = C_i + \sum_{j<i} \left\lceil \frac{R_i}{T_j} \right\rceil C_j
-$$
+$$R_i = C_i + \sum_{j<i} \left\lceil \frac{R_i}{T_j} \right\rceil C_j$$
 
 Where:
 
