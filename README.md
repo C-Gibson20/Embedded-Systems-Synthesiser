@@ -10,26 +10,6 @@ This project implements a real-time embedded music synthesiser on an STM32 micro
 
 The design emphasises deterministic timing, modular architecture, and safe concurrent execution using interrupts, DMA, and FreeRTOS-based scheduling.
 
----
-
-## Demonstration
-
-A demonstration of the system, including all implemented features, is shown below:
-
-<!-- Replace with actual video link -->
-[![System Demonstration]()]()
-
-The demonstration includes:
-
-- Real-time multi-voice audio synthesis.
-- Keyboard input and note triggering.
-- Rotary encoder parameter control.  
-- OLED display updates.
-- CAN-based communication between devices.  
-- Optional display-based game mode.  
-
----
-
 ## Documentation
 
 The project documentation is organised into two main sections:
@@ -59,3 +39,24 @@ src/                  # Source code
 include/              # Shared headers
 lib/                  # External libraries
 scripts/              # Development utilities
+```
+---
+
+## Demonstrations
+
+**CAN-Based Distributed Synthesis**
+
+<video src="doc/CAN.mp4" controls width="600"></video>
+
+**Instrument Presets and Advanced Waveforms**
+
+<video src="doc/Instruments.mp4" controls width="600"></video>
+
+**Held Notes and Polyphony**
+
+<video src="doc/Held.mp4" controls width="600"></video>
+
+**Display-Based Mini Game**
+
+<video src="doc/Dino.mp4" controls width="600"></video>
+---
