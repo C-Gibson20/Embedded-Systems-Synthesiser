@@ -7,7 +7,7 @@ Incoming and outgoing messages represent musical control events such as key pres
 
 ## 7.1 Message Format
 
-Each CAN message contains a fixed-length payload describing a musical event. The structure of the message payload is shown in Table 1.
+Each CAN message contains a fixed-length payload describing a musical event. The structure of the message payload is shown in the table below.
 
 | Byte | Meaning |
 | --- | --- |

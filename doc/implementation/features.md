@@ -7,19 +7,27 @@ This document describes the functional features implemented in the synthesiser s
 
 **CAN-Based Distributed Synthesis**
 
-<video src="../CAN.mp4" controls width="600"></video>
+https://github.com/user-attachments/assets/94364843-ae49-44b5-b197-1cc3da56e4ed
+<!-- <video src="../CAN.mp4" controls width="600"></video> -->
+[CAN-Based Distributed Synthesis Video](../CAN.mp4)
 
 **Instrument Presets and Advanced Waveforms**
 
-<video src="../Instruments.mp4" controls width="600"></video>
+https://github.com/user-attachments/assets/65f04ced-008e-4458-b12b-2c6a1a11a4ac
+<!-- <video src="../Instruments.mp4" controls width="600"></video> -->
+[Instrument Presets and Advanced Waveforms Video](../Instruments.mp4)
 
 **Held Notes and Polyphony**
 
-<video src="../Held.mp4" controls width="600"></video>
+https://github.com/user-attachments/assets/5124a1bb-8d5a-4f10-9eff-a028388088a4
+<!-- <video src="../Held.mp4" controls width="600"></video> -->
+[Held Notes and Polyphony Video](../Held.mp4)
 
 **Display-Based Mini Game**
 
-<video src="../Dino.mp4" controls width="600"></video>
+https://github.com/user-attachments/assets/3525706e-4e00-4314-abe7-5119c1b3943a
+<!-- <video src="../Dino.mp4" controls width="600"></video> -->
+[Display-Based Mini Game Video](../Dino.mp4)
 
 ## Core Features
 
@@ -80,13 +88,13 @@ Encoder inputs are processed using quadrature decoding and atomic state updates,
 
 The OLED display provides real-time visual feedback of the synthesiser state, updated at 10 Hz by a dedicated FreeRTOS task. Three lines are rendered:
 
-- **Line 1 — Active notes:** Names of all currently sounding notes.
-- **Line 2 — Synthesis parameters:** Pitch offset, waveform, octave (local or offset mode), and volume.
-- **Line 3 — Network role and CAN message:** Current device role (Sender / Receiver / Single) and the most recent CAN message payload.
+- **Line 1 - Active notes:** Names of all currently sounding notes.
+- **Line 2 - Synthesis parameters:** Pitch offset, waveform, octave (local or offset mode), and volume.
+- **Line 3 - Network role and CAN message:** Current device role (Sender / Receiver / Single) and the most recent CAN message payload.
 
 To reduce I2C bus load, `sendBuffer()` is only called when the displayed content has changed since the last frame.
 
-In V2, a custom U8g2 I2C callback (`u8x8_byte_rtos_hw_i2c`) replaces the default blocking implementation. It uses the STM32 hardware I2C peripheral and acquires the shared `i2cMutex` around each transaction, preventing conflicts with the knob expander on the same bus. This significantly reduces the WCET of `displayUpdateTask` compared to V1. In practice, real-world execution time is lower still, as typical frames are sparse and `sendBuffer()` is frequently skipped — see [Profiling](profiling.md) for further discussion.
+In V2, a custom U8g2 I2C callback (`u8x8_byte_rtos_hw_i2c`) replaces the default blocking implementation. It uses the STM32 hardware I2C peripheral and acquires the shared `i2cMutex` around each transaction, preventing conflicts with the knob expander on the same bus. This significantly reduces the WCET of `displayUpdateTask` compared to V1. In practice, real-world execution time is lower still, as typical frames are sparse and `sendBuffer()` is frequently skipped - see [Profiling](profiling.md) for further discussion.
 
 
 ## Networking Features

@@ -104,4 +104,4 @@ However, the following factors are not directly captured:
 - Context switching latency.
 - Task wake-up delays caused by the FreeRTOS scheduler tick.
 
-Overcoming this has been discussed in the report [scheduling_analysis.md](report/scheduling_analysis.md).
+Overcoming this has been discussed in the report [scheduling_analysis.md](../report/scheduling_analysis.md).
