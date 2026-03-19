@@ -10,6 +10,8 @@ This project implements a real-time embedded music synthesiser on an STM32 micro
 
 The design emphasises deterministic timing, modular architecture, and safe concurrent execution using interrupts, DMA, and FreeRTOS-based scheduling.
 
+---
+
 ## Documentation
 
 The project documentation is organised into two main sections:
